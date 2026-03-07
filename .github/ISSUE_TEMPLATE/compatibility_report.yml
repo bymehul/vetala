@@ -1,0 +1,79 @@
+name: Compatibility report
+description: Report platform, shell, terminal, or environment compatibility issues
+title: "[compat] "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for Linux distro differences, Windows/macOS issues, shell problems, TTY behavior, PATH issues, packaging issues, or environment-specific failures.
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - npm install -g @vetala/vetala
+        - npm link
+        - running from source
+        - packaged binary
+        - other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Ubuntu 24.04 / Arch / macOS 15 / Windows 11
+    validations:
+      required: true
+  - type: input
+    id: shell
+    attributes:
+      label: Shell
+      placeholder: bash / zsh / fish / PowerShell / cmd.exe / etc.
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      placeholder: GNOME Terminal / iTerm2 / Windows Terminal / tmux / etc.
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: node -v
+    validations:
+      required: true
+  - type: input
+    id: vetala_version
+    attributes:
+      label: Vetala version
+      placeholder: 0.1.0-dev
+  - type: textarea
+    id: problem
+    attributes:
+      label: Compatibility issue
+      description: What breaks or behaves differently in this environment?
+      placeholder: Ctrl+C pauses incorrectly / vetala is not found on PATH / rendering is broken / etc.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Install...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      render: shell
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Include terminal settings, locale, PATH behavior, permissions, or anything else relevant.

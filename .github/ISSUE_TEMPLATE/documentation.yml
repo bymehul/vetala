@@ -1,0 +1,52 @@
+name: Documentation issue
+description: Report unclear, missing, or incorrect documentation
+title: "[docs] "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for README, contributing docs, command docs, screenshots, and other written guidance.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Documentation problem
+      description: What is wrong, missing, or confusing?
+      placeholder: The installation section does not explain...
+    validations:
+      required: true
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: Link or file path if known
+      placeholder: README.md / CONTRIBUTING.md / command help / screenshot / etc.
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should it say instead?
+      description: Describe the correction or missing guidance.
+    validations:
+      required: true
+  - type: dropdown
+    id: doc_type
+    attributes:
+      label: Type
+      options:
+        - install
+        - usage
+        - commands
+        - configuration
+        - skills
+        - contributing
+        - screenshots / assets
+        - release / publishing
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Include screenshots, examples, or proposed wording if useful.

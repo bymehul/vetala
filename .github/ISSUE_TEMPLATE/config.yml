@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vetala README
+    url: https://github.com/vetala/vetala#readme
+    about: Check installation, usage, and publishing guidance first.

@@ -1,0 +1,57 @@
+{
+  "name": "@vetala/vetala",
+  "version": "0.1.0-dev",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Terminal-first AI coding CLI with tools, memory, and local skills.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bymehul/vetala.git"
+  },
+  "homepage": "https://github.com/bymehul/vetala#readme",
+  "bugs": {
+    "url": "https://github.com/bymehul/vetala/issues"
+  },
+  "bin": {
+    "vetala": "./dist/src/cli.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/src",
+    "skill",
+    "README.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.md",
+    "terminal.png"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "prepare": "npm run build",
+    "test": "node --test --import tsx test/**/*.ts"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^14.0.0",
+    "gradient-string": "^3.0.0",
+    "ink": "^6.8.0",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "ora": "^9.3.0",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.12",
+    "tsx": "^4.20.5",
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,0 +1,69 @@
+name: Feature request
+description: Suggest a new capability or workflow for Vetala
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+
+        Strong feature requests explain the workflow problem first, then the proposed solution.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or limitation are you hitting today?
+      placeholder: I want Vetala to...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you want.
+      placeholder: Add a command / tool / UI flow that...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What are you doing today instead, or what other options did you consider?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI / TUI
+        - tools
+        - skills
+        - memory / context
+        - approvals / safety
+        - configuration
+        - packaging / install
+        - docs
+        - other
+    validations:
+      required: true
+  - type: dropdown
+    id: breaking_change
+    attributes:
+      label: Would this change existing behavior?
+      options:
+        - no
+        - yes
+        - not sure
+    validations:
+      required: true
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples
+      description: Provide commands, mockups, transcripts, or screenshots if helpful.
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Anything else that would help evaluate the request?

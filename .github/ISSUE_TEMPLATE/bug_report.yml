@@ -1,0 +1,119 @@
+name: Bug report
+description: Report a problem with Vetala
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing an issue.
+
+        Vetala is currently tested on Linux. If you are reporting a Windows or macOS issue, please mention that clearly.
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - npm install -g @vetala/vetala
+        - npm link
+        - running from source
+        - packaged binary
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+      placeholder: Vetala failed when I ran...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest sequence that reproduces the issue.
+      placeholder: |
+        1. Run...
+        2. Enter...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: It should have...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste terminal output, screenshots, or stack traces if available.
+      render: shell
+  - type: textarea
+    id: command_or_prompt
+    attributes:
+      label: Command or prompt
+      description: What did you type into Vetala?
+      placeholder: |
+        /model
+        explain this codebase
+  - type: textarea
+    id: workspace_context
+    attributes:
+      label: Workspace context
+      description: Describe the repo, project size, or relevant files involved.
+      placeholder: Monorepo / single package / repo with local skills / etc.
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Ubuntu 24.04 / Arch / macOS 15 / Windows 11
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version
+      placeholder: node -v
+    validations:
+      required: true
+  - type: input
+    id: vetala_version
+    attributes:
+      label: Vetala version
+      placeholder: 0.1.0-dev
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      placeholder: Model name configured in /model
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Auth mode
+      options:
+        - SARVAM_API_KEY
+        - SARVAM_SUBSCRIPTION_KEY
+        - SARVAM_TOKEN
+        - configured via /model
+        - not configured
+    validations:
+      required: true
+  - type: dropdown
+    id: skill_usage
+    attributes:
+      label: Were local skills involved?
+      options:
+        - yes
+        - no
+        - not sure
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Anything else that would help reproduce or diagnose the issue?
