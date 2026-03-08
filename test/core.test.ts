@@ -35,6 +35,12 @@ import { SessionStore } from "../src/session-store.js";
 import { SkillRuntime } from "../src/skills/runtime.js";
 import type { SkillCatalogEntry } from "../src/skills/types.js";
 import { createToolRegistry } from "../src/tools/index.js";
+import {
+  checkForAppUpdate,
+  snoozeAppUpdate,
+  type AppUpdateNotifier,
+  type AppUpdateStore
+} from "../src/update-notifier.js";
 import type { PersistedMessage, SessionState, ToolCall, ToolContext } from "../src/types.js";
 
 test("SessionStore persists and reloads JSONL sessions", async () => {
@@ -296,6 +302,59 @@ test("Runtime profile detection normalizes host and terminal metadata", () => {
     formatRuntimeTerminalSummary(profile),
     "bash · vscode 1.99.0 / xterm-256color · 132x40"
   );
+});
+
+test("Update notifier surfaces cached updates and respects snooze", async () => {
+  await withIsolatedXdg(async () => {
+    const store = new MemoryUpdateStore();
+    const updateInfo = {
+      latest: "0.3.0",
+      current: "0.2.1-dev",
+      type: "minor",
+      name: "@vetala/vetala"
+    };
+    const notifier: AppUpdateNotifier = {
+      update: updateInfo,
+      config: store,
+      fetchInfo: async () => updateInfo
+    };
+    const forcedNotifier: AppUpdateNotifier = {
+      config: store,
+      fetchInfo: async () => updateInfo
+    };
+
+    const update = await checkForAppUpdate({
+      currentVersion: "0.2.1-dev",
+      notifier,
+      now: new Date("2026-03-08T00:00:00.000Z")
+    });
+
+    assert.equal(update?.latestVersion, "0.3.0");
+    assert.match(update?.installCommand ?? "", /npm install -g @vetala\/vetala@0\.3\.0/);
+
+    await snoozeAppUpdate("0.3.0", {
+      now: new Date("2026-03-08T00:05:00.000Z"),
+      durationMs: 60_000,
+      notifier
+    });
+
+    const suppressed = await checkForAppUpdate({
+      currentVersion: "0.2.1-dev",
+      notifier,
+      now: new Date("2026-03-08T00:05:30.000Z")
+    });
+
+    assert.equal(suppressed, null);
+
+    const visibleAgain = await checkForAppUpdate({
+      currentVersion: "0.2.1-dev",
+      notifier: forcedNotifier,
+      now: new Date("2026-03-08T00:06:30.000Z"),
+      force: true
+    });
+
+    assert.equal(visibleAgain?.latestVersion, "0.3.0");
+  });
 });
 
 test("Conversation compaction keeps recent messages and summarizes older context", () => {
@@ -663,5 +722,21 @@ async function withIsolatedXdg(run: () => Promise<void>): Promise<void> {
     } else {
       process.env.XDG_DATA_HOME = originalData;
     }
+  }
+}
+
+class MemoryUpdateStore implements AppUpdateStore {
+  readonly values = new Map<string, unknown>();
+
+  get(key: string): unknown {
+    return this.values.get(key);
+  }
+
+  set(key: string, value: unknown): void {
+    this.values.set(key, value);
+  }
+
+  delete(key: string): void {
+    this.values.delete(key);
   }
 }

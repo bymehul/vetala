@@ -21,6 +21,12 @@ import { SessionStore } from "../session-store.js";
 import { SkillRuntime } from "../skills/runtime.js";
 import type { SkillCatalogEntry } from "../skills/types.js";
 import { createToolRegistry } from "../tools/index.js";
+import {
+  checkForAppUpdate,
+  installAppUpdate,
+  snoozeAppUpdate,
+  type AvailableAppUpdate
+} from "../update-notifier.js";
 import { buildTranscriptCards } from "./transcript-cards.js";
 import type {
   ApprovalRequest,
@@ -62,6 +68,8 @@ interface BusyPromptState {
   prompt: string;
 }
 
+type UpdatePromptChoice = "update_now" | "update_later";
+
 interface AuthInputState {
   provider: ProviderName;
   model: string;
@@ -100,6 +108,7 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
   const [status, setStatus] = useState("Ready");
   const [pendingApproval, setPendingApproval] = useState<ApprovalPromptState | null>(null);
   const [pendingBusyPrompt, setPendingBusyPrompt] = useState<BusyPromptState | null>(null);
+  const [pendingUpdatePrompt, setPendingUpdatePrompt] = useState<AvailableAppUpdate | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [pendingSarvamModelPicker, setPendingSarvamModelPicker] = useState<"sarvam" | null>(null);
   const [pendingOpenRouterModelInput, setPendingOpenRouterModelInput] = useState<OpenRouterModelIdState | null>(null);
@@ -111,12 +120,14 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
   const [pendingExitConfirm, setPendingExitConfirm] = useState(false);
   const [queuedPrompt, setQueuedPrompt] = useState<string | null>(null);
   const [turnRunning, setTurnRunning] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState<AvailableAppUpdate | null>(null);
   const assistantBufferRef = useRef("");
   const assistantFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nextEntryIdRef = useRef(0);
   const queuedPromptRef = useRef<string | null>(null);
   const sessionRef = useRef(session);
   const turnRunningRef = useRef(false);
+  const updateCheckStartedRef = useRef(false);
   const uiRef = useRef<InkTerminalUI | null>(null);
   const skillRuntimeRef = useRef<SkillRuntime | null>(null);
   const activeAgentRef = useRef<Agent | null>(null);
@@ -208,6 +219,8 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
     !pendingExitConfirm &&
     !pendingApproval &&
     !pendingBusyPrompt &&
+    !pendingUpdatePrompt &&
+    !installingUpdate &&
     !modelPickerOpen &&
     !pendingSarvamModelPicker &&
     !pendingOpenRouterModelInput &&
@@ -249,6 +262,30 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
       clearTimeout(assistantFlushTimerRef.current);
     }
   }, []);
+
+  useEffect(() => {
+    if (!trusted || updateCheckStartedRef.current) {
+      return;
+    }
+
+    updateCheckStartedRef.current = true;
+    let cancelled = false;
+
+    void checkForAppUpdate()
+      .then((update) => {
+        if (!cancelled && update) {
+          setPendingUpdatePrompt(update);
+          setStatus(`Update available: ${update.latestVersion}`);
+        }
+      })
+      .catch(() => {
+        // Keep startup quiet if the registry cannot be reached.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [trusted]);
 
   useInput((inputValue, key) => {
     if (showSlashSuggestions && isTabInput(inputValue, key)) {
@@ -707,6 +744,65 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
     setStatus("Queued next prompt");
   };
 
+  const onUpdatePromptSelect = async (choice: UpdatePromptChoice) => {
+    const current = pendingUpdatePrompt;
+
+    if (!current) {
+      return;
+    }
+
+    if (choice === "update_later") {
+      await snoozeAppUpdate(current.latestVersion);
+      setPendingUpdatePrompt(null);
+      setStatus("Ready");
+      return;
+    }
+
+    setPendingUpdatePrompt(null);
+    setInstallingUpdate(current);
+    setStatus(`Installing ${current.latestVersion}`);
+
+    try {
+      const result = await installAppUpdate(current.latestVersion);
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+
+      if (result.timedOut || (result.exitCode ?? 1) !== 0) {
+        pushEntry(
+          "warn",
+          [
+            `Update failed for ${current.latestVersion}.`,
+            current.installCommand,
+            output || "(no output)"
+          ].join("\n")
+        );
+        setStatus("Update failed");
+        return;
+      }
+
+      pushEntry(
+        "info",
+        [
+          `Updated Vetala to ${current.latestVersion}.`,
+          "Restart Vetala to use the new version.",
+          current.installCommand
+        ].join("\n")
+      );
+      setStatus("Update installed; restart Vetala");
+    } catch (error) {
+      pushEntry(
+        "warn",
+        [
+          `Update failed for ${current.latestVersion}.`,
+          current.installCommand,
+          error instanceof Error ? error.message : String(error)
+        ].join("\n")
+      );
+      setStatus("Update failed");
+    } finally {
+      setInstallingUpdate(null);
+    }
+  };
+
   const applyModelSelection = async (nextSettings: ModelSetupState) => {
     const definition = getProviderDefinition(nextSettings.provider);
 
@@ -947,6 +1043,10 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
             <ApprovalBox request={pendingApproval.request} onSelect={onApprovalSelect} />
           ) : pendingBusyPrompt ? (
             <BusyPromptBox prompt={pendingBusyPrompt.prompt} onSelect={onBusyPromptSelect} />
+          ) : installingUpdate ? (
+            <UpdateInstallBox update={installingUpdate} />
+          ) : pendingUpdatePrompt ? (
+            <UpdatePromptBox update={pendingUpdatePrompt} onSelect={onUpdatePromptSelect} />
           ) : modelPickerOpen ? (
             <ModelPicker currentProvider={session.provider} onSelect={onModelSelect} />
           ) : pendingSarvamModelPicker ? (
@@ -1389,6 +1489,58 @@ function BusyPromptBox({
           onSelect={(item) => void onSelect(item.value)}
         />
       </Box>
+    </Box>
+  );
+}
+
+function UpdatePromptBox({
+  update,
+  onSelect
+}: {
+  update: AvailableAppUpdate;
+  onSelect: (value: UpdatePromptChoice) => Promise<void>;
+}) {
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.accent} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Update available</Text>
+      <Text>
+        {update.currentVersion} → {update.latestVersion}
+      </Text>
+      <Text color={UI_COLORS.muted}>{update.installCommand}</Text>
+      <Box marginTop={1}>
+        <SelectInput<UpdatePromptChoice>
+          items={[
+            {
+              label: "Update now",
+              value: "update_now"
+            },
+            {
+              label: "Update later",
+              value: "update_later"
+            }
+          ]}
+          onSelect={(item) => void onSelect(item.value)}
+        />
+      </Box>
+    </Box>
+  );
+}
+
+function UpdateInstallBox({
+  update
+}: {
+  update: AvailableAppUpdate;
+}) {
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.accent} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Installing update</Text>
+      <Box>
+        <Text color={UI_COLORS.accent}>
+          <Spinner type="dots" />
+        </Text>
+        <Text> Updating to {update.latestVersion}...</Text>
+      </Box>
+      <Text color={UI_COLORS.muted}>{update.installCommand}</Text>
     </Box>
   );
 }

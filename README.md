@@ -20,11 +20,17 @@ Vetala is designed for code-focused terminal work:
 - provider-first `/model` flow with OpenRouter model-id entry
 - diff previews for file edits and `/undo` for the last tracked change
 - queued or force-sent follow-up prompts while the current turn is still running
+- startup update notifier powered by `update-notifier` with “update now” or “update later”
 - built-in HTML search providers with DuckDuckGo by default and Stack Overflow for coding lookups
 
 Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
+
+### v0.2.1-dev
+
+- switched the startup updater to `update-notifier` while keeping Vetala's own in-app `update now` or `update later` prompt
+- added cached foreground update checks plus snooze handling so a fresh npm release can surface cleanly in the TUI
 
 ### v0.2.0-dev
 
