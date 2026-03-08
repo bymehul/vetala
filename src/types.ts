@@ -2,6 +2,8 @@ export type ChatRole = "system" | "user" | "assistant" | "tool";
 
 export type ApprovalScope = "once" | "session" | "deny";
 export type ReasoningEffort = "low" | "medium" | "high";
+export type ProviderName = "sarvam" | "openrouter";
+export type SearchProviderName = "disabled" | "duckduckgo" | "stack_overflow" | "brave" | "bing";
 
 export interface ToolCallFunction {
   name: string;
@@ -39,9 +41,25 @@ export interface SessionApprovals {
   webAccess: boolean;
 }
 
+export interface RuntimeHostProfile {
+  platform: NodeJS.Platform;
+  arch: string;
+  release: string;
+  osVersion: string;
+  shell: string;
+  terminalProgram: string;
+  terminalType: string;
+  colorSupport: string;
+  stdinIsTTY: boolean;
+  stdoutIsTTY: boolean;
+  columns: number | null;
+  rows: number | null;
+}
+
 export interface SessionState {
   id: string;
   workspaceRoot: string;
+  provider: ProviderName;
   model: string;
   createdAt: string;
   updatedAt: string;
@@ -50,11 +68,13 @@ export interface SessionState {
   referencedFiles: string[];
   readFiles: string[];
   pinnedSkills: string[];
+  edits: FileEdit[];
 }
 
 export interface SessionListItem {
   id: string;
   workspaceRoot: string;
+  provider: ProviderName;
   model: string;
   createdAt: string;
   updatedAt: string;
@@ -64,6 +84,7 @@ export interface SessionMetaRecord {
   type: "meta";
   id: string;
   workspaceRoot: string;
+  provider?: ProviderName;
   model: string;
   createdAt: string;
 }
@@ -93,6 +114,7 @@ export interface SessionReadRecord {
 
 export interface SessionModelRecord {
   type: "model";
+  provider?: ProviderName;
   model: string;
   timestamp: string;
 }
@@ -104,6 +126,27 @@ export interface SessionSkillRecord {
   timestamp: string;
 }
 
+export interface FileEdit {
+  id: string;
+  path: string;
+  beforeContent: string | null;
+  afterContent: string;
+  summary: string;
+  timestamp: string;
+  revertedAt?: string | null;
+}
+
+export interface SessionEditRecord {
+  type: "edit";
+  edit: FileEdit;
+}
+
+export interface SessionEditRevertRecord {
+  type: "edit_revert";
+  editId: string;
+  timestamp: string;
+}
+
 export type SessionRecord =
   | SessionMetaRecord
   | SessionMessageRecord
@@ -111,26 +154,49 @@ export type SessionRecord =
   | SessionReferenceRecord
   | SessionReadRecord
   | SessionModelRecord
-  | SessionSkillRecord;
+  | SessionSkillRecord
+  | SessionEditRecord
+  | SessionEditRevertRecord;
+
+export interface ProviderSavedAuth {
+  mode: "bearer" | "subscription_key";
+  sha256: string;
+  value?: string;
+}
+
+export interface ProviderFileConfig {
+  defaultModel?: string;
+  baseUrl?: string;
+  savedAuth?: ProviderSavedAuth;
+}
 
 export interface FileConfig {
+  defaultProvider?: ProviderName;
   defaultModel?: string;
   reasoningEffort?: ReasoningEffort | null;
   baseUrl?: string;
+  providers?: Partial<Record<ProviderName, ProviderFileConfig>>;
   searchProvider?: {
-    name?: string;
+    name?: SearchProviderName;
   };
   trustedWorkspaces?: string[];
-  savedAuth?: {
-    mode: "bearer" | "subscription_key";
-    sha256: string;
-    value?: string;
-  };
+  savedAuth?: ProviderSavedAuth;
 }
 
 export type AuthSource = "env" | "session" | "stored" | "stored_hash" | "missing";
 
+export interface ProviderRuntimeConfig {
+  name: ProviderName;
+  baseUrl: string;
+  defaultModel: string;
+  authMode: "bearer" | "subscription_key" | "missing";
+  authValue: string | undefined;
+  authFingerprint: string | undefined;
+  authSource: AuthSource;
+}
+
 export interface EffectiveConfig {
+  defaultProvider: ProviderName;
   authMode: "bearer" | "subscription_key" | "missing";
   authValue: string | undefined;
   authFingerprint: string | undefined;
@@ -140,8 +206,9 @@ export interface EffectiveConfig {
   reasoningEffort: ReasoningEffort | null;
   configPath: string;
   dataPath: string;
-  searchProviderName: string;
+  searchProviderName: SearchProviderName;
   trustedWorkspaces: string[];
+  providers: Record<ProviderName, ProviderRuntimeConfig>;
 }
 
 export type ApprovalKind =
@@ -196,6 +263,14 @@ export interface ToolContext {
     hasRead(path: string): boolean;
     registerRead(path: string): Promise<void>;
   };
+  edits: {
+    recordEdit(edit: {
+      path: string;
+      beforeContent: string | null;
+      afterContent: string;
+      summary: string;
+    }): Promise<FileEdit>;
+  };
   paths: {
     resolve(inputPath: string): string;
     ensureReadable(inputPath: string): Promise<string>;
@@ -213,7 +288,7 @@ export interface ToolSpec {
   execute(rawArgs: unknown, context: ToolContext): Promise<ToolResult>;
 }
 
-export interface SarvamToolDefinition {
+export interface ToolDefinition {
   type: "function";
   function: {
     name: string;
@@ -222,29 +297,29 @@ export interface SarvamToolDefinition {
   };
 }
 
-export interface SarvamChatCompletionRequest {
+export interface ChatCompletionRequest {
   messages: ChatMessage[];
   model: string;
   stream?: boolean;
   temperature?: number;
   reasoning_effort?: ReasoningEffort | null;
-  tools?: SarvamToolDefinition[];
+  tools?: ToolDefinition[];
   tool_choice?: "none" | "auto" | "required";
 }
 
-export interface SarvamChatCompletionMessage {
+export interface ChatCompletionMessage {
   role: "assistant";
   content: string | null;
   tool_calls?: ToolCall[] | null;
 }
 
-export interface SarvamChatCompletionResponse {
+export interface ChatCompletionResponse {
   id: string;
   model: string;
   choices: Array<{
     finish_reason: string;
     index: number;
-    message: SarvamChatCompletionMessage;
+    message: ChatCompletionMessage;
   }>;
   usage?: {
     prompt_tokens: number;
@@ -253,7 +328,7 @@ export interface SarvamChatCompletionResponse {
   } | null;
 }
 
-export interface SarvamStreamDeltaToolCall {
+export interface StreamDeltaToolCall {
   index: number;
   id?: string;
   type?: "function";
@@ -263,7 +338,7 @@ export interface SarvamStreamDeltaToolCall {
   };
 }
 
-export interface SarvamStreamChunk {
+export interface StreamChunk {
   id?: string;
   choices?: Array<{
     index: number;
@@ -271,10 +346,17 @@ export interface SarvamStreamChunk {
     delta?: {
       role?: "assistant";
       content?: string | null;
-      tool_calls?: SarvamStreamDeltaToolCall[];
+      tool_calls?: StreamDeltaToolCall[];
     };
   }>;
 }
+
+export type SarvamToolDefinition = ToolDefinition;
+export type SarvamChatCompletionRequest = ChatCompletionRequest;
+export type SarvamChatCompletionMessage = ChatCompletionMessage;
+export type SarvamChatCompletionResponse = ChatCompletionResponse;
+export type SarvamStreamDeltaToolCall = StreamDeltaToolCall;
+export type SarvamStreamChunk = StreamChunk;
 
 export interface StreamedAssistantTurn {
   content: string;

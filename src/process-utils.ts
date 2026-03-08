@@ -5,6 +5,7 @@ export interface CommandOutput {
   stderr: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  timedOut: boolean;
 }
 
 interface BaseOptions {
@@ -21,12 +22,14 @@ export async function runExecFile(
   options: BaseOptions
 ): Promise<CommandOutput> {
   return new Promise((resolve, reject) => {
+    let timedOut = false;
     const child = spawn(file, args, {
       cwd: options.cwd,
       stdio: ["ignore", "pipe", "pipe"]
     });
 
     const timeout = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGTERM");
     }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
@@ -48,7 +51,7 @@ export async function runExecFile(
 
     child.on("close", (exitCode, signal) => {
       clearTimeout(timeout);
-      resolve({ stdout, stderr, exitCode, signal });
+      resolve({ stdout, stderr, exitCode, signal, timedOut });
     });
   });
 }

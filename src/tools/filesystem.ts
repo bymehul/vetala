@@ -1,18 +1,13 @@
 import path from "node:path";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { runExecFile } from "../process-utils.js";
+import { buildDiffPreview } from "../edits/diff.js";
 import type { ToolContext, ToolResult, ToolSpec } from "../types.js";
+import { searchRepo, searchRepoSymbol } from "./repo-search.js";
 
 const MAX_READ_LINES = 400;
 const DEFAULT_SEARCH_LIMIT = 20;
 const DEFAULT_SYMBOL_LIMIT = 3;
 const DEFAULT_SYMBOL_CONTEXT = 20;
-
-interface SearchMatch {
-  filePath: string;
-  lineNumber: number;
-  lineText: string;
-}
 
 interface PatchChange {
   search: string;
@@ -90,6 +85,19 @@ const searchRepoTool: ToolSpec = {
       limit: {
         type: "integer",
         description: "Maximum number of matches to return. Defaults to 20."
+      },
+      mode: {
+        type: "string",
+        description: "Search mode: `fixed` for exact text or `regex` for a regular expression. Defaults to `fixed`."
+      },
+      caseSensitive: {
+        type: "boolean",
+        description: "If true, match case exactly. Defaults to false."
+      },
+      globs: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional glob filters to limit the search, for example `src/**/*.ts`."
       }
     },
     required: ["query"],
@@ -204,6 +212,11 @@ const readSymbolTool: ToolSpec = {
       contextLines: {
         type: "integer",
         description: "Number of surrounding lines to include before and after the match. Defaults to 20."
+      },
+      globs: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional glob filters to limit the symbol search."
       }
     },
     required: ["symbol"],
@@ -216,7 +229,13 @@ const readSymbolTool: ToolSpec = {
     const target = await context.paths.ensureReadable(stringOrDefault(args.path, "."));
     const limit = clampInteger(integerOrDefault(args.limit, DEFAULT_SYMBOL_LIMIT), 1, 8);
     const contextLines = clampInteger(integerOrDefault(args.contextLines, DEFAULT_SYMBOL_CONTEXT), 1, 80);
-    const matches = await findTextMatches(symbol, target, limit, context);
+    const matches = await searchRepoSymbol({
+      symbol,
+      target,
+      cwd: context.cwd,
+      limit,
+      globs: stringArray(args.globs)
+    });
 
     if (matches.length === 0) {
       return {
@@ -280,7 +299,12 @@ const writeFileTool: ToolSpec = {
     const approved = await context.approvals.requestApproval({
       kind: "write_file",
       key: `write_file:${target}`,
-      label: `Allow writing file?\npath: ${target}`
+      label: [
+        "Allow writing file?",
+        `path: ${target}`,
+        "",
+        buildDiffPreview(target, await readExistingText(target), requiredString(args.content, "content"))
+      ].join("\n")
     });
 
     if (!approved) {
@@ -288,13 +312,16 @@ const writeFileTool: ToolSpec = {
     }
 
     await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, requiredString(args.content, "content"), "utf8");
-    return {
-      summary: `Wrote ${target}`,
-      content: `File written successfully:\n${target}`,
-      isError: false,
-      referencedFiles: [target]
-    };
+    const nextContent = requiredString(args.content, "content");
+    const previousContent = await readExistingText(target);
+    await writeFile(target, nextContent, "utf8");
+    await context.edits.recordEdit({
+      path: target,
+      beforeContent: previousContent,
+      afterContent: nextContent,
+      summary: "write_file"
+    });
+    return successWithDiff(target, previousContent, nextContent, `Wrote ${target}`);
   }
 };
 
@@ -346,17 +373,32 @@ const applyPatchTool: ToolSpec = {
     }
 
     const changes = requiredPatchChanges(args.changes);
+    const original = await readFile(target, "utf8");
+    let applied;
+
+    try {
+      applied = applyChangesToContent(target, original, changes);
+    } catch (error) {
+      return denied(error instanceof Error ? error.message : String(error));
+    }
+
     const approved = await context.approvals.requestApproval({
       kind: "replace_in_file",
       key: `replace_in_file:${target}`,
-      label: `Allow patching file?\npath: ${target}\nchanges: ${changes.length}`
+      label: [
+        "Allow patching file?",
+        `path: ${target}`,
+        `changes: ${changes.length}`,
+        "",
+        buildDiffPreview(target, original, applied.updated)
+      ].join("\n")
     });
 
     if (!approved) {
       return denied(`Patch denied for ${target}`);
     }
 
-    return applyPatchChanges(target, changes);
+    return writePatchedFile(target, original, applied.updated, `Patched ${target}`, context, changes.length, applied.replacements);
   }
 };
 
@@ -396,23 +438,37 @@ const replaceInFileTool: ToolSpec = {
       return guard;
     }
 
+    const original = await readFile(target, "utf8");
+    let applied;
+
+    try {
+      applied = applyChangesToContent(target, original, [
+        {
+          search: requiredString(args.search, "search"),
+          replace: requiredStringOrEmpty(args.replace, "replace"),
+          all: booleanOrDefault(args.all, false)
+        }
+      ]);
+    } catch (error) {
+      return denied(error instanceof Error ? error.message : String(error));
+    }
+
     const approved = await context.approvals.requestApproval({
       kind: "replace_in_file",
       key: `replace_in_file:${target}`,
-      label: `Allow editing file?\npath: ${target}`
+      label: [
+        "Allow editing file?",
+        `path: ${target}`,
+        "",
+        buildDiffPreview(target, original, applied.updated)
+      ].join("\n")
     });
 
     if (!approved) {
       return denied(`Replace denied for ${target}`);
     }
 
-    return applyPatchChanges(target, [
-      {
-        search: requiredString(args.search, "search"),
-        replace: requiredString(args.replace, "replace"),
-        all: booleanOrDefault(args.all, false)
-      }
-    ]);
+    return writePatchedFile(target, original, applied.updated, `Edited ${target}`, context, 1, applied.replacements);
   }
 };
 
@@ -420,10 +476,18 @@ async function executeSearchTool(args: Record<string, unknown>, context: ToolCon
   const query = requiredString(args.query, "query");
   const target = await context.paths.ensureReadable(stringOrDefault(args.path, "."));
   const limit = clampInteger(integerOrDefault(args.limit, DEFAULT_SEARCH_LIMIT), 1, 200);
-  const matches = await findTextMatches(query, target, limit, context);
+  const matches = await searchRepo({
+    query,
+    target,
+    cwd: context.cwd,
+    limit,
+    mode: args.mode === "regex" ? "regex" : "fixed",
+    caseSensitive: args.caseSensitive === true,
+    globs: stringArray(args.globs)
+  });
 
   return {
-    summary: matches.length > 0 ? `Found matches for "${query}"` : `No matches for "${query}"`,
+    summary: matches.length > 0 ? `Found ${matches.length} matches for "${query}"` : `No matches for "${query}"`,
     content: matches.length > 0
       ? matches.map((match) => `${match.filePath}:${match.lineNumber}:${match.lineText}`).join("\n")
       : "(no matches)",
@@ -470,99 +534,6 @@ async function denyUnreadEdit(target: string, context: ToolContext, action: stri
   return denied(
     `Refusing to ${action} ${target} before reading it. Use search_repo to find it, then read_file, read_file_chunk, or read_symbol first.`
   );
-}
-
-async function applyPatchChanges(target: string, changes: PatchChange[]): Promise<ToolResult> {
-  const original = await readFile(target, "utf8");
-  let updated = original;
-  let replacements = 0;
-
-  for (const change of changes) {
-    const occurrenceCount = countOccurrences(updated, change.search);
-
-    if (occurrenceCount === 0) {
-      return {
-        summary: `Patch text not found in ${target}`,
-        content: `No occurrences of the requested text were found in ${target}.`,
-        isError: true,
-        referencedFiles: [target]
-      };
-    }
-
-    replacements += change.all ? occurrenceCount : 1;
-    updated = change.all
-      ? updated.split(change.search).join(change.replace)
-      : updated.replace(change.search, change.replace);
-  }
-
-  await writeFile(target, updated, "utf8");
-  return {
-    summary: `Patched ${target} (${changes.length} change${changes.length === 1 ? "" : "s"}, ${replacements} replacement${replacements === 1 ? "" : "s"})`,
-    content: `Applied ${changes.length} patch change${changes.length === 1 ? "" : "s"} in ${target}.`,
-    isError: false,
-    referencedFiles: [target]
-  };
-}
-
-async function findTextMatches(
-  query: string,
-  target: string,
-  limit: number,
-  context: ToolContext
-): Promise<SearchMatch[]> {
-  try {
-    const result = await runExecFile(
-      "rg",
-      [
-        "--fixed-strings",
-        "--line-number",
-        "--no-heading",
-        "--color",
-        "never",
-        "--max-count",
-        String(limit),
-        query,
-        target
-      ],
-      { cwd: context.cwd }
-    );
-
-    return parseSearchMatches(`${result.stdout}${result.stderr}`, limit);
-  } catch (error) {
-    if (!isMissingBinary(error)) {
-      throw error;
-    }
-
-    return fallbackSearch(query, target, limit);
-  }
-}
-
-function parseSearchMatches(output: string, limit: number): SearchMatch[] {
-  const matches: SearchMatch[] = [];
-
-  for (const line of output.split(/\r?\n/)) {
-    if (!line.trim()) {
-      continue;
-    }
-
-    const match = line.match(/^(.*?):(\d+):(.*)$/);
-
-    if (!match) {
-      continue;
-    }
-
-    matches.push({
-      filePath: match[1] ?? "",
-      lineNumber: Number(match[2]),
-      lineText: match[3] ?? ""
-    });
-
-    if (matches.length >= limit) {
-      break;
-    }
-  }
-
-  return matches;
 }
 
 function requiredPatchChanges(value: unknown): PatchChange[] {
@@ -636,10 +607,6 @@ function denied(message: string): ToolResult {
   };
 }
 
-function isMissingBinary(error: unknown): error is NodeJS.ErrnoException {
-  return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
-}
-
 async function existsPath(target: string): Promise<boolean> {
   try {
     await stat(target);
@@ -665,67 +632,77 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-async function fallbackSearch(query: string, target: string, limit: number): Promise<SearchMatch[]> {
-  const matches: SearchMatch[] = [];
-  const stats = await stat(target);
-
-  if (stats.isFile()) {
-    await searchFile(query, target, matches, limit);
-    return matches;
+async function readExistingText(target: string): Promise<string | null> {
+  if (!await existsPath(target)) {
+    return null;
   }
 
-  const queue = [target];
-
-  while (queue.length > 0 && matches.length < limit) {
-    const current = queue.shift();
-
-    if (!current) {
-      continue;
-    }
-
-    const entries = await readdir(current, { withFileTypes: true });
-
-    for (const entry of entries) {
-      if (matches.length >= limit) {
-        break;
-      }
-
-      if (entry.name === "node_modules" || entry.name.startsWith(".")) {
-        continue;
-      }
-
-      const entryPath = path.join(current, entry.name);
-
-      if (entry.isDirectory()) {
-        queue.push(entryPath);
-      } else if (entry.isFile()) {
-        await searchFile(query, entryPath, matches, limit);
-      }
-    }
-  }
-
-  return matches;
+  return readFile(target, "utf8");
 }
 
-async function searchFile(query: string, filePath: string, matches: SearchMatch[], limit: number): Promise<void> {
-  try {
-    const content = await readFile(filePath, "utf8");
-    const lines = content.split("\n");
+function applyChangesToContent(target: string, original: string, changes: PatchChange[]): { updated: string; replacements: number } {
+  let updated = original;
+  let replacements = 0;
 
-    for (const [index, line] of lines.entries()) {
-      if (line.includes(query)) {
-        matches.push({
-          filePath,
-          lineNumber: index + 1,
-          lineText: line
-        });
-      }
+  for (const change of changes) {
+    const occurrenceCount = countOccurrences(updated, change.search);
 
-      if (matches.length >= limit) {
-        return;
-      }
+    if (occurrenceCount === 0) {
+      throw new Error(`No occurrences of the requested text were found in ${target}.`);
     }
-  } catch {
-    // Skip unreadable or binary files in the fallback path.
+
+    replacements += change.all ? occurrenceCount : 1;
+    updated = change.all
+      ? updated.split(change.search).join(change.replace)
+      : updated.replace(change.search, change.replace);
   }
+
+  return { updated, replacements };
+}
+
+async function writePatchedFile(
+  target: string,
+  original: string,
+  updated: string,
+  summary: string,
+  context: ToolContext,
+  changeCount: number,
+  replacements: number
+): Promise<ToolResult> {
+  await writeFile(target, updated, "utf8");
+  await context.edits.recordEdit({
+    path: target,
+    beforeContent: original,
+    afterContent: updated,
+    summary
+  });
+
+  return {
+    summary: `${summary} (${changeCount} change${changeCount === 1 ? "" : "s"}, ${replacements} replacement${replacements === 1 ? "" : "s"})`,
+    content: [
+      `Applied ${changeCount} change${changeCount === 1 ? "" : "s"} in ${target}.`,
+      "",
+      buildDiffPreview(target, original, updated)
+    ].join("\n"),
+    isError: false,
+    referencedFiles: [target]
+  };
+}
+
+function successWithDiff(target: string, beforeContent: string | null, afterContent: string, summary: string): ToolResult {
+  return {
+    summary,
+    content: [
+      `File written successfully:`,
+      target,
+      "",
+      buildDiffPreview(target, beforeContent, afterContent)
+    ].join("\n"),
+    isError: false,
+    referencedFiles: [target]
+  };
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
 }

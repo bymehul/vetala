@@ -86,7 +86,18 @@ body:
     id: vetala_version
     attributes:
       label: Vetala version
-      placeholder: 0.1.0-dev
+      placeholder: 0.2.0-dev
+  - type: textarea
+    id: runtime_profile
+    attributes:
+      label: Host and terminal from /config
+      description: Run `/config` inside Vetala and paste the `host:` and `term:` lines here.
+      placeholder: |
+        host:    Linux x64 (6.8.0)
+        term:    bash · vscode / xterm-256color · 132x40
+      render: shell
+    validations:
+      required: true
   - type: input
     id: model
     attributes:

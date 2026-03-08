@@ -4,7 +4,9 @@ import { appendFile, readFile, readdir, writeFile } from "node:fs/promises";
 import { ensureAppPaths } from "./xdg.js";
 import type {
   ApprovalEvent,
+  FileEdit,
   PersistedMessage,
+  ProviderName,
   SessionListItem,
   SessionRecord,
   SessionState
@@ -17,13 +19,15 @@ const EMPTY_APPROVALS = {
 };
 
 export class SessionStore {
-  async createSession(workspaceRoot: string, model: string): Promise<SessionState> {
+  async createSession(workspaceRoot: string, providerOrModel: ProviderName | string, maybeModel?: string): Promise<SessionState> {
     const paths = await ensureAppPaths();
     const id = createSessionId();
     const createdAt = new Date().toISOString();
+    const { provider, model } = normalizeProviderAndModel(providerOrModel, maybeModel);
     const state: SessionState = {
       id,
       workspaceRoot,
+      provider,
       model,
       createdAt,
       updatedAt: createdAt,
@@ -31,12 +35,14 @@ export class SessionStore {
       messages: [],
       referencedFiles: [],
       readFiles: [],
-      pinnedSkills: []
+      pinnedSkills: [],
+      edits: []
     };
     const record: SessionRecord = {
       type: "meta",
       id,
       workspaceRoot,
+      provider,
       model,
       createdAt
     };
@@ -61,6 +67,7 @@ export class SessionStore {
           state = {
             id: record.id,
             workspaceRoot: record.workspaceRoot,
+            provider: record.provider ?? "sarvam",
             model: record.model,
             createdAt: record.createdAt,
             updatedAt: record.createdAt,
@@ -68,7 +75,8 @@ export class SessionStore {
             messages: [],
             referencedFiles: [],
             readFiles: [],
-            pinnedSkills: []
+            pinnedSkills: [],
+            edits: []
           };
           break;
         case "message":
@@ -100,12 +108,25 @@ export class SessionStore {
           break;
         case "model":
           ensureState(state, sessionId);
+          if (record.provider) {
+            state.provider = record.provider;
+          }
           state.model = record.model;
           state.updatedAt = record.timestamp;
           break;
         case "skill":
           ensureState(state, sessionId);
           applySkillRecord(state, record);
+          state.updatedAt = record.timestamp;
+          break;
+        case "edit":
+          ensureState(state, sessionId);
+          state.edits.push(record.edit);
+          state.updatedAt = record.edit.timestamp;
+          break;
+        case "edit_revert":
+          ensureState(state, sessionId);
+          markEditReverted(state, record.editId, record.timestamp);
           state.updatedAt = record.timestamp;
           break;
         default:
@@ -151,6 +172,7 @@ export class SessionStore {
       .map((session) => ({
         id: session.id,
         workspaceRoot: session.workspaceRoot,
+        provider: session.provider,
         model: session.model,
         createdAt: session.createdAt,
         updatedAt: session.updatedAt
@@ -224,18 +246,58 @@ export class SessionStore {
     await this.updateLatestWorkspace(session.workspaceRoot, session.id);
   }
 
-  async updateModel(session: SessionState, model: string): Promise<void> {
+  async updateModel(session: SessionState, providerOrModel: ProviderName | string, maybeModel?: string): Promise<void> {
     const paths = await ensureAppPaths();
     const timestamp = new Date().toISOString();
+    const { provider, model } = normalizeProviderAndModel(providerOrModel, maybeModel, session.provider);
     const record: SessionRecord = {
       type: "model",
+      provider,
       model,
       timestamp
     };
 
+    session.provider = provider;
     session.model = model;
     session.updatedAt = timestamp;
     await appendFile(this.sessionPath(paths.sessionsDir, session.id), `${JSON.stringify(record)}\n`, "utf8");
+  }
+
+  async appendEdit(
+    session: SessionState,
+    input: Omit<FileEdit, "id" | "timestamp" | "revertedAt">
+  ): Promise<FileEdit> {
+    const paths = await ensureAppPaths();
+    const edit: FileEdit = {
+      ...input,
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString()
+    };
+    const record: SessionRecord = {
+      type: "edit",
+      edit
+    };
+
+    session.edits.push(edit);
+    session.updatedAt = edit.timestamp;
+    await appendFile(this.sessionPath(paths.sessionsDir, session.id), `${JSON.stringify(record)}\n`, "utf8");
+    await this.updateLatestWorkspace(session.workspaceRoot, session.id);
+    return edit;
+  }
+
+  async markEditReverted(session: SessionState, editId: string): Promise<void> {
+    const paths = await ensureAppPaths();
+    const timestamp = new Date().toISOString();
+    const record: SessionRecord = {
+      type: "edit_revert",
+      editId,
+      timestamp
+    };
+
+    markEditReverted(session, editId, timestamp);
+    session.updatedAt = timestamp;
+    await appendFile(this.sessionPath(paths.sessionsDir, session.id), `${JSON.stringify(record)}\n`, "utf8");
+    await this.updateLatestWorkspace(session.workspaceRoot, session.id);
   }
 
   async pinSkill(session: SessionState, skillName: string): Promise<void> {
@@ -354,6 +416,24 @@ function createSessionId(): string {
   return crypto.randomUUID();
 }
 
+function normalizeProviderAndModel(
+  providerOrModel: ProviderName | string,
+  maybeModel?: string,
+  fallbackProvider: ProviderName = "sarvam"
+): { provider: ProviderName; model: string } {
+  if (maybeModel !== undefined) {
+    return {
+      provider: providerOrModel as ProviderName,
+      model: maybeModel
+    };
+  }
+
+  return {
+    provider: fallbackProvider,
+    model: providerOrModel
+  };
+}
+
 function ensureState(state: SessionState | undefined, sessionId: string): asserts state is SessionState {
   if (!state) {
     throw new Error(`Session ${sessionId} is missing a meta record before other records.`);
@@ -362,6 +442,14 @@ function ensureState(state: SessionState | undefined, sessionId: string): assert
 
 function exhaustive(_: never): never {
   throw new Error("Unexpected session record.");
+}
+
+function markEditReverted(state: SessionState, editId: string, timestamp: string): void {
+  const edit = state.edits.find((candidate) => candidate.id === editId);
+
+  if (edit) {
+    edit.revertedAt = timestamp;
+  }
 }
 
 function isMissingFile(error: unknown): error is NodeJS.ErrnoException {

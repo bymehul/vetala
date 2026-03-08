@@ -16,8 +16,27 @@ Vetala is designed for code-focused terminal work:
 - approval-aware operations for safer workspace access
 - local `skill/` runtime for reusable instructions and references
 - prompt compaction to preserve continuity across longer sessions
+- provider-aware model selection with Sarvam and OpenRouter profiles
+- provider-first `/model` flow with OpenRouter model-id entry
+- diff previews for file edits and `/undo` for the last tracked change
+- queued or force-sent follow-up prompts while the current turn is still running
+- built-in HTML search providers with DuckDuckGo by default and Stack Overflow for coding lookups
 
-Current provider support is limited to Sarvam AI.
+Current provider support includes Sarvam AI and OpenRouter.
+
+## Patch Notes
+
+### v0.2.0-dev
+
+- added provider-aware `/model` setup with Sarvam model selection and manual OpenRouter model-id entry
+- added OpenRouter as the second supported provider
+- added HTML web search with DuckDuckGo by default plus Stack Overflow, Brave, and Bing provider options
+- added prompt guidance so Vetala searches instead of guessing when it is unsure about factual or current information
+- added diff previews before file changes and `/undo` for the last tracked edit
+- improved streaming performance and approval handling so long replies are less likely to stall the TUI
+- added runtime environment detection for host OS, shell, terminal type, and viewport so the UI and agent can adapt to the current machine
+- added `sleep` plus longer shell timeouts so the agent can wait for slower builds, tests, or generated output
+- added an interactive next-prompt popup so you can queue a message or stop the current turn and send the next one immediately
 
 ## Compatibility
 
@@ -59,6 +78,7 @@ npm run dev
 ```
 
 On startup, Vetala opens an interactive terminal UI and asks you to confirm trust for the current workspace before enabling tool access.
+It also detects the current host platform, shell, and terminal profile and exposes that context in the UI and agent runtime.
 
 ## Configuration
 
@@ -68,7 +88,10 @@ Model selection and credential setup are available from inside the TUI through:
 /model
 ```
 
+The default web search provider is DuckDuckGo HTML. For programming-specific web lookups, Vetala also exposes `stack_overflow_search`.
+
 Configuration and session data are stored in the user application directory for the current platform.
+`/config` also prints the `host:` and `term:` lines used in issue reports.
 
 ## Core Commands
 
@@ -79,6 +102,7 @@ Configuration and session data are stored in the user application directory for 
 - `/history` shows recent session messages
 - `/resume <session-id>` reopens a saved session
 - `/new` starts a fresh session
+- `/undo` reverts the last tracked file edit in the current session
 - `/approve` shows active approvals
 - `/config` prints runtime configuration
 - `/logout` clears locally saved auth state

@@ -3,37 +3,53 @@ import { Box, Text, useApp, useInput } from "ink";
 import SelectInput from "ink-select-input";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
-import { Agent } from "../agent.js";
+import { Agent, isAgentInterruptedError } from "../agent.js";
+import { latestUndoableEdit, undoLastEdit } from "../edit-history.js";
 import { ApprovalManager } from "../approvals.js";
 import {
-  clearSavedAuth,
+  clearProviderSavedAuth,
   loadConfig,
-  saveChatDefaults,
-  savePersistentAuth,
-  withSessionAuth,
-  withStoredAuth
+  providerConfigFor,
+  saveProviderDefaults,
+  saveProviderPersistentAuth,
+  withProviderSessionAuth,
+  withProviderStoredAuth
 } from "../config.js";
 import { PathPolicy } from "../path-policy.js";
+import { getProviderDefinition, listProviders, providerLabel } from "../providers/index.js";
 import { SessionStore } from "../session-store.js";
-import { SARVAM_MODELS } from "../sarvam/models.js";
 import { SkillRuntime } from "../skills/runtime.js";
 import type { SkillCatalogEntry } from "../skills/types.js";
 import { createToolRegistry } from "../tools/index.js";
+import { buildTranscriptCards } from "./transcript-cards.js";
 import type {
   ApprovalRequest,
   ApprovalScope,
   EffectiveConfig,
+  ProviderName,
   ReasoningEffort,
+  RuntimeHostProfile,
   SessionListItem,
   SessionState
 } from "../types.js";
 import { InkTerminalUI, type InkEntryKind, type InkUiEntry } from "./ink-terminal-ui.js";
 import { buildSlashSuggestions } from "./command-suggestions.js";
-import { buildTranscriptCards } from "./transcript-cards.js";
+
+const ASSISTANT_FLUSH_INTERVAL_MS = 33;
+const MAX_LIVE_ASSISTANT_LINES = 24;
+const MAX_VISIBLE_TRANSCRIPT_TURNS = 6;
+const UI_COLORS = {
+  accent: "blue",
+  muted: "gray",
+  border: "gray",
+  warning: "yellow",
+  danger: "red"
+} as const;
 
 interface ReplAppProps {
   initialConfig: EffectiveConfig;
   initialSession: SessionState;
+  runtimeProfile: RuntimeHostProfile;
   store: SessionStore;
 }
 
@@ -42,7 +58,12 @@ interface ApprovalPromptState {
   resolve: (scope: ApprovalScope) => void;
 }
 
+interface BusyPromptState {
+  prompt: string;
+}
+
 interface AuthInputState {
+  provider: ProviderName;
   model: string;
   reasoningEffort: ReasoningEffort | null;
   authMode: "bearer" | "subscription_key";
@@ -50,14 +71,23 @@ interface AuthInputState {
 }
 
 type AuthRetentionChoice = "persist" | "session" | "cancel";
+type BusyPromptChoice = "force" | "queue" | "cancel";
 type ReasoningEffortChoice = ReasoningEffort | "none" | "cancel";
 
 interface ModelSetupState {
+  provider: ProviderName;
   model: string;
   reasoningEffort: ReasoningEffort | null;
 }
 
-export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) {
+interface OpenRouterModelIdState {
+  provider: "openrouter";
+  value: string;
+}
+
+type ModelChoice = ProviderName | "cancel";
+
+export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }: ReplAppProps) {
   const { exit } = useApp();
   const [config, setConfig] = useState(initialConfig);
   const [session, setSession] = useState(() => cloneSession(initialSession));
@@ -69,18 +99,27 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
   const [spinnerLabel, setSpinnerLabel] = useState<string | null>(null);
   const [status, setStatus] = useState("Ready");
   const [pendingApproval, setPendingApproval] = useState<ApprovalPromptState | null>(null);
+  const [pendingBusyPrompt, setPendingBusyPrompt] = useState<BusyPromptState | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [pendingSarvamModelPicker, setPendingSarvamModelPicker] = useState<"sarvam" | null>(null);
+  const [pendingOpenRouterModelInput, setPendingOpenRouterModelInput] = useState<OpenRouterModelIdState | null>(null);
   const [pendingReasoningSetup, setPendingReasoningSetup] = useState<ModelSetupState | null>(null);
   const [pendingAuthInput, setPendingAuthInput] = useState<AuthInputState | null>(null);
   const [pendingAuthRetention, setPendingAuthRetention] = useState<AuthInputState | null>(null);
   const [availableSkills, setAvailableSkills] = useState<SkillCatalogEntry[]>([]);
   const [paused, setPaused] = useState(false);
   const [pendingExitConfirm, setPendingExitConfirm] = useState(false);
+  const [queuedPrompt, setQueuedPrompt] = useState<string | null>(null);
+  const [turnRunning, setTurnRunning] = useState(false);
   const assistantBufferRef = useRef("");
+  const assistantFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nextEntryIdRef = useRef(0);
+  const queuedPromptRef = useRef<string | null>(null);
   const sessionRef = useRef(session);
+  const turnRunningRef = useRef(false);
   const uiRef = useRef<InkTerminalUI | null>(null);
   const skillRuntimeRef = useRef<SkillRuntime | null>(null);
+  const activeAgentRef = useRef<Agent | null>(null);
 
   sessionRef.current = session;
 
@@ -95,7 +134,28 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
     ]);
   };
 
+  const flushAssistantBuffer = () => {
+    if (assistantFlushTimerRef.current) {
+      clearTimeout(assistantFlushTimerRef.current);
+      assistantFlushTimerRef.current = null;
+    }
+
+    setAssistantBuffer(assistantBufferRef.current);
+  };
+
+  const scheduleAssistantFlush = () => {
+    if (assistantFlushTimerRef.current) {
+      return;
+    }
+
+    assistantFlushTimerRef.current = setTimeout(() => {
+      assistantFlushTimerRef.current = null;
+      setAssistantBuffer(assistantBufferRef.current);
+    }, ASSISTANT_FLUSH_INTERVAL_MS);
+  };
+
   const finalizeAssistant = () => {
+    flushAssistantBuffer();
     const buffered = assistantBufferRef.current.trimEnd();
 
     if (!buffered) {
@@ -113,7 +173,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
     uiRef.current = new InkTerminalUI({
       appendAssistant: (text) => {
         assistantBufferRef.current += text;
-        setAssistantBuffer(assistantBufferRef.current);
+        scheduleAssistantFlush();
       },
       finalizeAssistant,
       pushEntry,
@@ -124,7 +184,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
         setSpinnerLabel(label);
         setStatus(label ?? "Ready");
       }
-    });
+    }, runtimeProfile);
   }
 
   const ui = uiRef.current;
@@ -135,18 +195,22 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
     });
   }
   const skills = skillRuntimeRef.current;
-  const busy = spinnerLabel !== null;
-  const transcriptCards = buildTranscriptCards(entries).slice(-8);
-  const liveCardId = transcriptCards.at(-1)?.id ?? null;
   const visibleStatus = paused ? "Paused" : status;
+  const visibleAssistantBuffer = renderLiveAssistantBuffer(assistantBuffer);
+  const transcriptCards = buildTranscriptCards(entries);
+  const visibleTranscriptCards = transcriptCards.slice(-MAX_VISIBLE_TRANSCRIPT_TURNS);
+  const hiddenTranscriptTurnCount = Math.max(0, transcriptCards.length - visibleTranscriptCards.length);
   const slashSuggestions = buildSlashSuggestions(input, availableSkills).slice(0, 8);
   const showSlashSuggestions = Boolean(
     trusted &&
-    !busy &&
+    !turnRunning &&
     !paused &&
     !pendingExitConfirm &&
     !pendingApproval &&
+    !pendingBusyPrompt &&
     !modelPickerOpen &&
+    !pendingSarvamModelPicker &&
+    !pendingOpenRouterModelInput &&
     !pendingReasoningSetup &&
     !pendingAuthInput &&
     !pendingAuthRetention &&
@@ -179,6 +243,12 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
       cancelled = true;
     };
   }, [skills]);
+
+  useEffect(() => () => {
+    if (assistantFlushTimerRef.current) {
+      clearTimeout(assistantFlushTimerRef.current);
+    }
+  }, []);
 
   useInput((inputValue, key) => {
     if (showSlashSuggestions && isTabInput(inputValue, key)) {
@@ -220,6 +290,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
   };
 
   const resetTranscript = () => {
+    flushAssistantBuffer();
     assistantBufferRef.current = "";
     setAssistantBuffer("");
     setActivityLabel(null);
@@ -227,41 +298,80 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
     setEntries([]);
   };
 
-  const mergeLoadedConfig = (loaded: EffectiveConfig): EffectiveConfig => {
-    if (config.authSource === "session" && config.authValue) {
-      return {
-        ...loaded,
-        authMode: config.authMode,
-        authValue: config.authValue,
-        authFingerprint: config.authFingerprint,
-        authSource: "session"
-      };
+  const mergeLoadedConfig = (loaded: EffectiveConfig, skipProvider?: ProviderName): EffectiveConfig => {
+    let merged = loaded;
+
+    for (const provider of listProviders()) {
+      if (provider.name === skipProvider) {
+        continue;
+      }
+
+      const currentProfile = config.providers[provider.name];
+
+      if (
+        currentProfile.authSource === "session" &&
+        currentProfile.authValue &&
+        currentProfile.authMode !== "missing"
+      ) {
+        merged = withProviderSessionAuth(
+          merged,
+          provider.name,
+          currentProfile.authMode,
+          currentProfile.authValue
+        );
+      }
     }
 
-    return loaded;
+    return merged;
   };
 
   const closeCommandModals = () => {
     setModelPickerOpen(false);
+    setPendingSarvamModelPicker(null);
+    setPendingOpenRouterModelInput(null);
     setPendingReasoningSetup(null);
     setPendingAuthInput(null);
     setPendingAuthRetention(null);
   };
 
-  const runPrompt = async (prompt: string) => {
+  const setQueuedPromptState = (prompt: string | null) => {
+    queuedPromptRef.current = prompt;
+    setQueuedPrompt(prompt);
+  };
+
+  const setTurnRunningState = (value: boolean) => {
+    turnRunningRef.current = value;
+    setTurnRunning(value);
+  };
+
+  const beginQueuedPrompt = (prompt: string) => {
+    setQueuedPromptState(null);
+    setPendingBusyPrompt(null);
+    void runPrompt(prompt, { forceRun: true });
+  };
+
+  const runPrompt = async (prompt: string, options: { forceRun?: boolean } = {}) => {
     const trimmed = prompt.trim();
 
     if (!trimmed) {
       return;
     }
 
+    if (turnRunningRef.current && !options.forceRun) {
+      setPendingBusyPrompt({ prompt: trimmed });
+      setInput("");
+      return;
+    }
+
     if (trimmed.startsWith("/")) {
+      setInput("");
       await handleCommand(trimmed);
       return;
     }
 
     setInput("");
     setPendingExitConfirm(false);
+    setPendingBusyPrompt(null);
     setActivityLabel(null);
     pushEntry("user", summarizeUserPrompt(trimmed));
     setStatus("Running agent");
@@ -273,22 +383,40 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
       sessionStore: store,
       approvals,
       pathPolicy: new PathPolicy(session.workspaceRoot, approvals),
+      runtimeProfile,
       skills,
       tools: createTools(),
       ui
     });
+    activeAgentRef.current = agent;
+    setTurnRunningState(true);
 
     try {
       await agent.runTurn(trimmed, true);
       syncSession(session);
       setActivityLabel(null);
-      setStatus("Ready");
+      setStatus(queuedPromptRef.current ? "Running queued prompt" : "Ready");
     } catch (error) {
+      if (isAgentInterruptedError(error)) {
+        setActivityLabel(null);
+        syncSession(session);
+        setStatus(queuedPromptRef.current ? "Running queued prompt" : "Interrupted");
+        return;
+      }
+
       finalizeAssistant();
       setActivityLabel(null);
       pushEntry("error", error instanceof Error ? error.message : String(error));
       setStatus("Failed");
       syncSession(session);
+    } finally {
+      activeAgentRef.current = null;
+      setTurnRunningState(false);
+
+      const nextQueuedPrompt = queuedPromptRef.current;
+      if (nextQueuedPrompt) {
+        beginQueuedPrompt(nextQueuedPrompt);
+      }
     }
   };
 
@@ -305,6 +433,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
           [
             "/help",
             "/model",
+            "/undo",
             "/skill",
             "/tools",
             "/history",
@@ -324,8 +453,18 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
         }
         closeCommandModals();
         setModelPickerOpen(true);
-        setStatus("Select a model");
+        setStatus("Select a provider and model");
         return;
+      case "undo": {
+        const result = await undoLastEdit(session, store, (request) => {
+          const approvals = new ApprovalManager(session, store, null, requestApprovalDecision);
+          return approvals.requestApproval(request);
+        });
+        syncSession(session);
+        pushEntry(result.isError ? "warn" : "info", result.content);
+        setStatus(result.isError ? "Undo blocked" : "Ready");
+        return;
+      }
       case "skill":
       case "skills":
         await handleSkillsCommand(args);
@@ -369,7 +508,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
         return;
       }
       case "new": {
-        const nextSession = await store.createSession(session.workspaceRoot, session.model);
+        const nextSession = await store.createSession(session.workspaceRoot, session.provider, session.model);
         const nextCloned = syncSession(nextSession);
         closeCommandModals();
         resetTranscript();
@@ -390,24 +529,24 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
         ui.printConfig(config);
         return;
       case "logout": {
-        const previousAuthSource = config.authSource;
-        await clearSavedAuth();
+        const previousProfile = providerConfigFor(config, session.provider);
+        await clearProviderSavedAuth(session.provider);
         closeCommandModals();
 
-        const reloaded = await loadConfig();
+        const reloaded = mergeLoadedConfig(await loadConfig(), session.provider);
         setConfig(reloaded);
 
-        if (reloaded.authSource === "env") {
+        if (providerConfigFor(reloaded, session.provider).authSource === "env") {
           pushEntry(
             "warn",
-            "Cleared local auth state, but environment credentials are still active for this process."
+            `Cleared local ${providerLabel(session.provider)} auth state, but environment credentials are still active for this process.`
           );
-        } else if (previousAuthSource === "stored" || previousAuthSource === "stored_hash") {
-          pushEntry("info", "Cleared the saved API key for future launches and removed current local auth.");
-        } else if (previousAuthSource === "session") {
-          pushEntry("info", "Cleared the API key that was only active in this session.");
+        } else if (previousProfile.authSource === "stored" || previousProfile.authSource === "stored_hash") {
+          pushEntry("info", `Cleared the saved ${providerLabel(session.provider)} credential for future launches.`);
+        } else if (previousProfile.authSource === "session") {
+          pushEntry("info", `Cleared the ${providerLabel(session.provider)} credential that was only active in this session.`);
         } else {
-          pushEntry("info", "No saved API key remained after logout.");
+          pushEntry("info", `No saved ${providerLabel(session.provider)} credential remained after logout.`);
         }
 
         setStatus("Logged out");
@@ -535,9 +674,71 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
     promptState.resolve(value);
   };
 
-  const onModelSelect = async (
-    value: (typeof SARVAM_MODELS)[number] | "cancel"
-  ) => {
+  const onBusyPromptSelect = async (choice: BusyPromptChoice) => {
+    const current = pendingBusyPrompt;
+
+    if (!current) {
+      return;
+    }
+
+    if (choice === "cancel") {
+      setPendingBusyPrompt(null);
+      setInput(current.prompt);
+      return;
+    }
+
+    const replacedExistingQueue = queuedPromptRef.current !== null;
+    setQueuedPromptState(current.prompt);
+    setPendingBusyPrompt(null);
+
+    pushEntry(
+      "info",
+      choice === "force"
+        ? `Stopping the current turn and sending next: ${summarizeUserPrompt(current.prompt)}`
+        : `${replacedExistingQueue ? "Replaced" : "Queued"} next prompt: ${summarizeUserPrompt(current.prompt)}`
+    );
+
+    if (choice === "force") {
+      setStatus("Stopping current turn");
+      activeAgentRef.current?.requestStop();
+      return;
+    }
+
+    setStatus("Queued next prompt");
+  };
+
+  const applyModelSelection = async (nextSettings: ModelSetupState) => {
+    const definition = getProviderDefinition(nextSettings.provider);
+
+    await store.updateModel(session, nextSettings.provider, nextSettings.model);
+    await saveProviderDefaults(
+      nextSettings.provider,
+      nextSettings.model,
+      definition.supportsReasoningEffort
+        ? { reasoningEffort: nextSettings.reasoningEffort }
+        : {}
+    );
+    syncSession(session);
+
+    const nextConfig = mergeLoadedConfig(await loadConfig());
+    setConfig(nextConfig);
+
+    const nextProfile = providerConfigFor(nextConfig, nextSettings.provider);
+    if (nextProfile.authSource === "missing" || nextProfile.authSource === "stored_hash") {
+      setPendingAuthInput({
+        ...nextSettings,
+        authMode: definition.auth.defaultMode,
+        value: ""
+      });
+      setStatus(`Enter ${definition.auth.inputLabel.toLowerCase()} for ${providerLabel(nextSettings.provider)} / ${nextSettings.model}`);
+      return;
+    }
+
+    pushEntry("info", formatModelSetupSummary(nextSettings, nextConfig));
+    setStatus("Ready");
+  };
+
+  const onModelSelect = async (value: ModelChoice) => {
     if (value === "cancel") {
       setModelPickerOpen(false);
       setStatus("Ready");
@@ -545,11 +746,34 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
     }
 
     setModelPickerOpen(false);
+
+    if (value === "sarvam") {
+      setPendingSarvamModelPicker("sarvam");
+      setStatus("Select a Sarvam model");
+      return;
+    }
+
+    setPendingOpenRouterModelInput({
+      provider: "openrouter",
+      value: session.provider === "openrouter" ? session.model : providerConfigFor(config, "openrouter").defaultModel
+    });
+    setStatus("Enter an OpenRouter model id");
+  };
+
+  const onSarvamModelSelect = async (value: string | "cancel") => {
+    if (value === "cancel") {
+      setPendingSarvamModelPicker(null);
+      setStatus("Ready");
+      return;
+    }
+
+    setPendingSarvamModelPicker(null);
     setPendingReasoningSetup({
+      provider: "sarvam",
       model: value,
       reasoningEffort: config.reasoningEffort
     });
-    setStatus(`Select reasoning effort for ${value}`);
+    setStatus(`Select reasoning effort for Sarvam / ${value}`);
   };
 
   const onReasoningSelect = async (value: ReasoningEffortChoice) => {
@@ -571,26 +795,33 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
       reasoningEffort: value === "none" ? null : value
     };
 
-    await store.updateModel(session, nextSettings.model);
-    await saveChatDefaults(nextSettings.model, nextSettings.reasoningEffort);
-    syncSession(session);
+    await applyModelSelection(nextSettings);
+  };
 
-    const loadedConfig = await loadConfig();
-    const nextConfig = mergeLoadedConfig(loadedConfig);
-    setConfig(nextConfig);
+  const onOpenRouterModelInputChange = (value: string) => {
+    setPendingOpenRouterModelInput((current) => (current ? { ...current, value } : current));
+  };
 
-    if (nextConfig.authSource === "missing" || nextConfig.authSource === "stored_hash") {
-      setPendingAuthInput({
-        ...nextSettings,
-        authMode: "subscription_key",
-        value: ""
-      });
-      setStatus(`Enter API key for ${nextSettings.model}`);
+  const onOpenRouterModelInputSubmit = async (value: string) => {
+    const trimmed = value.trim();
+
+    if (!pendingOpenRouterModelInput) {
       return;
     }
 
-    pushEntry("info", formatModelSetupSummary(nextSettings, nextConfig));
-    setStatus("Ready");
+    if (!trimmed) {
+      setPendingOpenRouterModelInput(null);
+      pushEntry("warn", "OpenRouter model selection cancelled.");
+      setStatus("Ready");
+      return;
+    }
+
+    setPendingOpenRouterModelInput(null);
+    await applyModelSelection({
+      provider: "openrouter",
+      model: trimmed,
+      reasoningEffort: null
+    });
   };
 
   const onAuthInputChange = (value: string) => {
@@ -610,7 +841,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
       setPendingAuthInput(null);
       pushEntry(
         "warn",
-        "API key entry cancelled. Model settings were saved, but no usable Sarvam credential is active."
+        `Credential entry cancelled. Model settings were saved, but no usable ${providerLabel(current.provider)} credential is active.`
       );
       setStatus("Ready");
       return;
@@ -621,7 +852,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
       ...current,
       value: trimmed
     });
-    setStatus("Choose how long to keep this API key");
+    setStatus("Choose how long to keep this credential");
   };
 
   const onAuthRetentionSelect = async (choice: AuthRetentionChoice) => {
@@ -641,18 +872,18 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
     const loadedConfig = await loadConfig();
     const nextConfig =
       choice === "persist"
-        ? withStoredAuth(loadedConfig, current.authMode, current.value)
-        : withSessionAuth(loadedConfig, current.authMode, current.value);
+        ? withProviderStoredAuth(loadedConfig, current.provider, current.authMode, current.value)
+        : withProviderSessionAuth(loadedConfig, current.provider, current.authMode, current.value);
 
     if (choice === "persist") {
-      await savePersistentAuth(current.authMode, current.value);
+      await saveProviderPersistentAuth(current.provider, current.authMode, current.value);
     }
 
     setConfig(nextConfig);
     setPendingAuthRetention(null);
     pushEntry("info", formatModelSetupSummary(current, nextConfig, choice));
 
-    if (choice === "persist" && loadedConfig.authSource === "env") {
+    if (choice === "persist" && providerConfigFor(loadedConfig, current.provider).authSource === "env") {
       pushEntry(
         "warn",
         "Environment credentials are still set in this shell. They may take precedence on future launches."
@@ -682,24 +913,27 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
         <>
           <Dashboard config={config} session={session} status={visibleStatus} />
           <Box marginTop={1} flexDirection="column">
-            {transcriptCards.length === 0 && !assistantBuffer && !spinnerLabel ? (
-              <Box borderStyle="round" borderColor="gray" paddingX={1}>
-                <Text color="gray">New transcript. Use /history if you want earlier session messages.</Text>
+            {entries.length === 0 && !assistantBuffer && !spinnerLabel ? (
+              <Box borderStyle="round" borderColor={UI_COLORS.border} paddingX={1}>
+                <Text color={UI_COLORS.muted}>New transcript. Use /history if you want earlier session messages.</Text>
               </Box>
             ) : null}
 
-            {transcriptCards.map((card) => (
-              <TranscriptCard
-                key={card.id}
-                card={card}
-                assistantBuffer={card.id === liveCardId ? assistantBuffer : ""}
-                liveLabel={card.id === liveCardId ? activityLabel ?? spinnerLabel : null}
-              />
+            {hiddenTranscriptTurnCount > 0 ? (
+              <Box marginBottom={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1}>
+                <Text color={UI_COLORS.muted}>
+                  {hiddenTranscriptTurnCount} earlier turn{hiddenTranscriptTurnCount === 1 ? "" : "s"} hidden. Use /history to inspect older messages or /clear to reset the visible transcript.
+                </Text>
+              </Box>
+            ) : null}
+
+            {visibleTranscriptCards.map((card) => (
+              <TranscriptTurnCard key={card.id} card={card} />
             ))}
 
-            {transcriptCards.length === 0 && (assistantBuffer || activityLabel || spinnerLabel) ? (
+            {(assistantBuffer || activityLabel || spinnerLabel) ? (
               <LiveStatusCard
-                assistantBuffer={assistantBuffer}
+                assistantBuffer={visibleAssistantBuffer}
                 liveLabel={activityLabel ?? spinnerLabel}
               />
             ) : null}
@@ -711,11 +945,22 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
             <PauseBox />
           ) : pendingApproval ? (
             <ApprovalBox request={pendingApproval.request} onSelect={onApprovalSelect} />
+          ) : pendingBusyPrompt ? (
+            <BusyPromptBox prompt={pendingBusyPrompt.prompt} onSelect={onBusyPromptSelect} />
           ) : modelPickerOpen ? (
-            <ModelPicker currentModel={session.model} onSelect={onModelSelect} />
+            <ModelPicker currentProvider={session.provider} onSelect={onModelSelect} />
+          ) : pendingSarvamModelPicker ? (
+            <SarvamModelPicker currentModel={session.provider === "sarvam" ? session.model : null} onSelect={onSarvamModelSelect} />
+          ) : pendingOpenRouterModelInput ? (
+            <OpenRouterModelIdBox
+              state={pendingOpenRouterModelInput}
+              onChange={onOpenRouterModelInputChange}
+              onSubmit={onOpenRouterModelInputSubmit}
+            />
           ) : pendingReasoningSetup ? (
             <ReasoningEffortPicker
               currentValue={pendingReasoningSetup.reasoningEffort}
+              provider={pendingReasoningSetup.provider}
               model={pendingReasoningSetup.model}
               onSelect={onReasoningSelect}
             />
@@ -730,7 +975,7 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
           ) : (
             <>
               <InputBox
-                busy={busy}
+                busy={turnRunning}
                 value={input}
                 onChange={setInput}
                 onSubmit={runPrompt}
@@ -739,7 +984,12 @@ export function ReplApp({ initialConfig, initialSession, store }: ReplAppProps) 
             </>
           )}
 
-          <Footer config={config} status={visibleStatus} session={session} />
+          <Footer
+            config={config}
+            queuedPrompt={queuedPrompt}
+            status={visibleStatus}
+            session={session}
+          />
         </>
       )}
     </Box>
@@ -755,7 +1005,9 @@ function Dashboard({
   session: SessionState;
   status: string;
 }) {
+  const activeProvider = providerConfigFor(config, session.provider);
   const infoRows = [
+    { item: "provider", value: providerLabel(session.provider) },
     { item: "model", value: session.model },
     { item: "directory", value: session.workspaceRoot },
     { item: "session", value: session.id.slice(0, 8) },
@@ -763,18 +1015,19 @@ function Dashboard({
   ];
 
   const stateRows = [
-    { item: "auth", value: describeAuth(config) },
-    { item: "reasoning", value: formatReasoningEffort(config.reasoningEffort) },
+    { item: "auth", value: describeAuth(activeProvider) },
+    { item: "reasoning", value: formatReasoningEffort(config.reasoningEffort, session.provider) },
     { item: "skills", value: describeSkills(session.pinnedSkills.length) },
-    { item: "sha256", value: config.authFingerprint?.slice(0, 12) ?? "(none)" },
+    { item: "undo", value: latestUndoableEdit(session) ? "ready" : "none" },
+    { item: "sha256", value: activeProvider.authFingerprint?.slice(0, 12) ?? "(none)" },
     { item: "context", value: describeContext(session.messages.length) }
   ];
 
   return (
     <>
-      <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="row">
+      <Box borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="row">
         <Box flexDirection="column" width="60%" paddingRight={2}>
-          <Text color="yellow">Vetala</Text>
+          <Text color={UI_COLORS.accent}>Vetala</Text>
           <Text bold>Ready.</Text>
           <Box marginTop={1} flexDirection="column">
             {infoRows.map((row) => (
@@ -784,18 +1037,19 @@ function Dashboard({
         </Box>
 
         <Box flexDirection="column" width="40%">
-          <Text color="yellow">Tips</Text>
+          <Text color={UI_COLORS.accent}>Tips</Text>
           <Text>/help for commands</Text>
-          <Text>/model for model + reasoning</Text>
+          <Text>/model for provider + model</Text>
+          <Text>/undo to revert last edit</Text>
           <Text>/skill to inspect local skills</Text>
           <Text>/logout to clear local auth</Text>
           <Text>Ctrl+C to pause</Text>
           <Text>Ctrl+D to exit</Text>
           <Box marginTop={1}>
-            <Text color="gray">status: {status}</Text>
+            <Text color={UI_COLORS.muted}>status: {status}</Text>
           </Box>
           <Box marginTop={1}>
-            <Text color="yellow">Context</Text>
+            <Text color={UI_COLORS.accent}>Context</Text>
           </Box>
           {stateRows.map((row) => (
             <InfoRow key={row.item} item={row.item} value={row.value} />
@@ -803,7 +1057,7 @@ function Dashboard({
         </Box>
       </Box>
 
-      <Box marginTop={1} borderStyle="round" borderColor="gray" paddingX={1}>
+      <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1}>
         <Text>Try "explain this codebase" or "write a test for &lt;filepath&gt;"</Text>
       </Box>
     </>
@@ -814,7 +1068,7 @@ function InfoRow({ item, value }: { item: string; value: string }) {
   return (
     <Box>
       <Box width={12}>
-        <Text color="gray">{item}</Text>
+        <Text color={UI_COLORS.muted}>{item}</Text>
       </Box>
       <Text>{value}</Text>
     </Box>
@@ -829,8 +1083,8 @@ function TrustScreen({
   onSelect: (value: "trust" | "exit") => Promise<void>;
 }) {
   return (
-    <Box borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column">
-      <Text color="yellow">Accessing workspace</Text>
+    <Box borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Accessing workspace</Text>
       <Box marginTop={1}>
         <Text>{workspaceRoot}</Text>
       </Box>
@@ -864,8 +1118,8 @@ function ApprovalBox({
   onSelect: (value: ApprovalScope) => Promise<void>;
 }) {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="magenta" paddingX={1} flexDirection="column">
-      <Text color="magenta">Approval required</Text>
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.warning} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.warning}>Approval required</Text>
       {request.label.split("\n").map((line) => (
         <Text key={line}>{line}</Text>
       ))}
@@ -884,26 +1138,85 @@ function ApprovalBox({
 }
 
 function ModelPicker({
+  currentProvider,
+  onSelect
+}: {
+  currentProvider: ProviderName;
+  onSelect: (value: ModelChoice) => Promise<void>;
+}) {
+  const items: Array<{ label: string; value: ModelChoice }> = [
+    ...listProviders().map((provider) => ({
+      label: provider.name === currentProvider ? `${provider.label} (current)` : provider.label,
+      value: provider.name
+    })),
+    { label: "Cancel", value: "cancel" as const }
+  ];
+
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Select provider</Text>
+      <Text color={UI_COLORS.muted}>Current: {providerLabel(currentProvider)}</Text>
+      <Box marginTop={1}>
+        <SelectInput<ModelChoice>
+          items={items}
+          onSelect={(item) => void onSelect(item.value)}
+        />
+      </Box>
+    </Box>
+  );
+}
+
+function SarvamModelPicker({
   currentModel,
   onSelect
 }: {
-  currentModel: string;
-  onSelect: (value: (typeof SARVAM_MODELS)[number] | "cancel") => Promise<void>;
+  currentModel: string | null;
+  onSelect: (value: string | "cancel") => Promise<void>;
+}) {
+  const items = [
+    ...getProviderDefinition("sarvam").suggestedModels.map((model) => ({
+      label: model === currentModel ? `${model} (current)` : model,
+      value: model
+    })),
+    { label: "Cancel", value: "cancel" as const }
+  ];
+
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Select a Sarvam model</Text>
+      <Text color={UI_COLORS.muted}>After model selection, Vetala will ask for reasoning effort.</Text>
+      <Box marginTop={1}>
+        <SelectInput<string | "cancel">
+          items={items}
+          onSelect={(item) => void onSelect(item.value)}
+        />
+      </Box>
+    </Box>
+  );
+}
+
+function OpenRouterModelIdBox({
+  state,
+  onChange,
+  onSubmit
+}: {
+  state: OpenRouterModelIdState;
+  onChange: (value: string) => void;
+  onSubmit: (value: string) => Promise<void>;
 }) {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="green" paddingX={1} flexDirection="column">
-      <Text color="green">Select model</Text>
-      <Text color="gray">Current: {currentModel}</Text>
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Enter an OpenRouter model id</Text>
+      <Text color={UI_COLORS.muted}>Examples: `openai/gpt-4o-mini`, `anthropic/claude-3.5-haiku`, `google/gemini-2.0-flash-001`</Text>
+      <Text color={UI_COLORS.muted}>Reasoning differs by OpenRouter model. Vetala will use the provider default instead of forcing one global reasoning setting.</Text>
+      <Text color={UI_COLORS.muted}>Press Enter on an empty field to cancel.</Text>
       <Box marginTop={1}>
-        <SelectInput
-          items={[
-            ...SARVAM_MODELS.map((model) => ({
-              label: model === currentModel ? `${model} (current)` : model,
-              value: model
-            })),
-            { label: "Cancel", value: "cancel" as const }
-          ]}
-          onSelect={(item) => void onSelect(item.value)}
+        <Text color={UI_COLORS.accent}>model </Text>
+        <TextInput
+          highlightPastedText={false}
+          value={state.value}
+          onChange={onChange}
+          onSubmit={(value) => void onSubmit(value)}
         />
       </Box>
     </Box>
@@ -912,18 +1225,20 @@ function ModelPicker({
 
 function ReasoningEffortPicker({
   currentValue,
+  provider,
   model,
   onSelect
 }: {
   currentValue: ReasoningEffort | null;
+  provider: ProviderName;
   model: string;
   onSelect: (value: ReasoningEffortChoice) => Promise<void>;
 }) {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="green" paddingX={1} flexDirection="column">
-      <Text color="green">Select reasoning effort</Text>
-      <Text color="gray">
-        Model: {model} · Current: {formatReasoningEffort(currentValue)}
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Select reasoning effort</Text>
+      <Text color={UI_COLORS.muted}>
+        Provider: {providerLabel(provider)} · Model: {model} · Current: {formatReasoningEffort(currentValue, provider)}
       </Text>
       <Box marginTop={1}>
         <SelectInput
@@ -950,17 +1265,19 @@ function AuthInputBox({
   onChange: (value: string) => void;
   onSubmit: (value: string) => Promise<void>;
 }) {
+  const definition = getProviderDefinition(state.provider);
+
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="green" paddingX={1} flexDirection="column">
-      <Text color="green">Enter API key for {state.model}</Text>
-      <Text color="gray">
-        This will be used as Sarvam&apos;s `apiSubscriptionKey`. After you press Enter, choose whether
-        Vetala keeps it for all sessions or only for this session.
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Enter {definition.auth.inputLabel.toLowerCase()} for {providerLabel(state.provider)} / {state.model}</Text>
+      <Text color={UI_COLORS.muted}>
+        {definition.auth.helpText} After you press Enter, choose whether Vetala keeps it for all sessions
+        or only for this session.
       </Text>
-      <Text color="gray">Reasoning: {formatReasoningEffort(state.reasoningEffort)}</Text>
-      <Text color="gray">Press Enter on an empty field to cancel.</Text>
+      <Text color={UI_COLORS.muted}>Reasoning: {formatReasoningEffort(state.reasoningEffort, state.provider)}</Text>
+      <Text color={UI_COLORS.muted}>Press Enter on an empty field to cancel.</Text>
       <Box marginTop={1}>
-        <Text color="cyan">key </Text>
+        <Text color={UI_COLORS.accent}>key </Text>
         <TextInput
           mask="*"
           highlightPastedText={false}
@@ -981,11 +1298,11 @@ function AuthRetentionBox({
   onSelect: (value: AuthRetentionChoice) => Promise<void>;
 }) {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="green" paddingX={1} flexDirection="column">
-      <Text color="green">Keep API key for {state.model}</Text>
-      <Text color="gray">Key preview: {maskSecretPreview(state.value)}</Text>
-      <Text color="gray">Reasoning: {formatReasoningEffort(state.reasoningEffort)}</Text>
-      <Text color="gray">Future-session mode stores the raw key locally until you run /logout.</Text>
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Keep credential for {providerLabel(state.provider)} / {state.model}</Text>
+      <Text color={UI_COLORS.muted}>Key preview: {maskSecretPreview(state.value)}</Text>
+      <Text color={UI_COLORS.muted}>Reasoning: {formatReasoningEffort(state.reasoningEffort, state.provider)}</Text>
+      <Text color={UI_COLORS.muted}>Future-session mode stores the raw key locally until you run /logout.</Text>
       <Box marginTop={1} flexDirection="column">
         <Text>Choose how long Vetala should keep this key:</Text>
       </Box>
@@ -1024,18 +1341,54 @@ function InputBox({
   onSubmit: (value: string) => Promise<void>;
 }) {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="white" paddingX={1}>
-      <Text color="cyan">❯ </Text>
-      {busy ? (
-        <Text color="gray">Agent is busy. Wait for the current turn to finish.</Text>
-      ) : (
-        <TextInput
-          highlightPastedText={false}
-          value={value}
-          onChange={onChange}
-          onSubmit={(nextValue) => void onSubmit(nextValue)}
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1}>
+      <Text color={UI_COLORS.accent}>❯ </Text>
+      <TextInput
+        highlightPastedText={false}
+        value={value}
+        onChange={onChange}
+        onSubmit={(nextValue) => void onSubmit(nextValue)}
+      />
+      {busy ? <Text color={UI_COLORS.muted}>  Enter to queue or force-send.</Text> : null}
+    </Box>
+  );
+}
+
+function BusyPromptBox({
+  prompt,
+  onSelect
+}: {
+  prompt: string;
+  onSelect: (value: BusyPromptChoice) => Promise<void>;
+}) {
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.warning} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.warning}>Current turn is still running</Text>
+      <Text color={UI_COLORS.muted}>Choose what to do with the next prompt:</Text>
+      <Box marginTop={1} flexDirection="column">
+        {summarizeUserPrompt(prompt).split("\n").map((line) => (
+          <Text key={line}>{line}</Text>
+        ))}
+      </Box>
+      <Box marginTop={1}>
+        <SelectInput<BusyPromptChoice>
+          items={[
+            {
+              label: "Send now (stop current turn)",
+              value: "force"
+            },
+            {
+              label: "Send after current turn",
+              value: "queue"
+            },
+            {
+              label: "Cancel",
+              value: "cancel"
+            }
+          ]}
+          onSelect={(item) => void onSelect(item.value)}
         />
-      )}
+      </Box>
     </Box>
   );
 }
@@ -1046,18 +1399,21 @@ function SlashSuggestionBox({
   suggestions: ReturnType<typeof buildSlashSuggestions>;
 }) {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="blue" paddingX={1} flexDirection="column">
-      <Text color="blue">Commands</Text>
-      <Text color="gray">Tab autocompletes the first match.</Text>
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Commands</Text>
+      <Text color={UI_COLORS.muted}>Tab autocompletes the first match.</Text>
       {suggestions.map((suggestion, index) => (
         <Box key={suggestion.label}>
           <Box width="45%">
-            <Text color={index === 0 ? "cyan" : "white"}>
-              {index === 0 ? "❯ " : "  "}
-              {suggestion.label}
-            </Text>
+            {index === 0 ? (
+              <Text color={UI_COLORS.accent}>
+                ❯ {suggestion.label}
+              </Text>
+            ) : (
+              <Text>  {suggestion.label}</Text>
+            )}
           </Box>
-          <Text color="gray">{suggestion.detail}</Text>
+          <Text color={UI_COLORS.muted}>{suggestion.detail}</Text>
         </Box>
       ))}
     </Box>
@@ -1066,8 +1422,8 @@ function SlashSuggestionBox({
 
 function PauseBox() {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1} flexDirection="column">
-      <Text color="yellow">Paused</Text>
+    <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1} flexDirection="column">
+      <Text color={UI_COLORS.accent}>Paused</Text>
       <Text>Press Ctrl+C again to resume.</Text>
       <Text>Press Ctrl+D if you want to exit.</Text>
     </Box>
@@ -1082,7 +1438,7 @@ function ExitConfirmBox({
   return (
     <Box marginTop={1} borderStyle="round" borderColor="red" paddingX={1} flexDirection="column">
       <Text color="red">Exit Vetala?</Text>
-      <Text color="gray">Current session state is already written to disk as it changes.</Text>
+      <Text color={UI_COLORS.muted}>Current session state is already written to disk as it changes.</Text>
       <Box marginTop={1}>
         <SelectInput
           items={[
@@ -1098,31 +1454,31 @@ function ExitConfirmBox({
 
 function Footer({
   config,
+  queuedPrompt,
   status,
   session
 }: {
   config: EffectiveConfig;
+  queuedPrompt: string | null;
   status: string;
   session: SessionState;
 }) {
+  const activeProvider = providerConfigFor(config, session.provider);
+
   return (
     <Box marginTop={1} justifyContent="space-between">
-      <Text color="gray">/help for commands · Ctrl+C pause · Ctrl+D exit</Text>
-      <Text color="gray">
-        {status} · {describeAuth(config)} · {describeContext(session.messages.length)}
+      <Text color={UI_COLORS.muted}>/help for commands · /undo reverts last edit · Ctrl+C pause · Ctrl+D exit</Text>
+      <Text color={UI_COLORS.muted}>
+        {status}{queuedPrompt ? " · queued next prompt" : ""} · {describeAuth(activeProvider)} · {describeContext(session.messages.length)}
       </Text>
     </Box>
   );
 }
 
-function TranscriptCard({
-  card,
-  assistantBuffer,
-  liveLabel
+function TranscriptTurnCard({
+  card
 }: {
   card: ReturnType<typeof buildTranscriptCards>[number];
-  assistantBuffer: string;
-  liveLabel: string | null;
 }) {
   const borderColor = transcriptCardBorder(card.entries);
 
@@ -1131,10 +1487,6 @@ function TranscriptCard({
       {card.entries.map((entry) => (
         <TranscriptSection key={entry.id} entry={entry} />
       ))}
-      {liveLabel ? <LiveActivitySection label={liveLabel} /> : null}
-      {assistantBuffer ? (
-        <TranscriptSection entry={{ id: `${card.id}:stream`, kind: "assistant", text: assistantBuffer }} />
-      ) : null}
     </Box>
   );
 }
@@ -1147,7 +1499,7 @@ function LiveStatusCard({
   liveLabel: string | null;
 }) {
   return (
-    <Box marginBottom={1} borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column">
+    <Box marginBottom={1} borderStyle="round" borderColor={UI_COLORS.accent} paddingX={1} flexDirection="column">
       {liveLabel ? <LiveActivitySection label={liveLabel} /> : null}
       {assistantBuffer ? (
         <TranscriptSection entry={{ id: "live:assistant", kind: "assistant", text: assistantBuffer }} />
@@ -1158,13 +1510,14 @@ function LiveStatusCard({
 
 function TranscriptSection({ entry }: { entry: InkUiEntry }) {
   const isActivity = entry.kind === "activity";
+  const labelColor = entryColor(entry.kind);
 
   return (
     <Box marginBottom={1} flexDirection="column">
-      <Text color={entryColor(entry.kind)}>{entryLabel(entry.kind)}</Text>
+      {labelColor ? <Text color={labelColor}>{entryLabel(entry.kind)}</Text> : <Text>{entryLabel(entry.kind)}</Text>}
       {entry.text.split("\n").map((line, index) =>
         isActivity ? (
-          <Text key={`${entry.id}:${index}`} color="gray">
+          <Text key={`${entry.id}:${index}`} color={UI_COLORS.muted}>
             {line.length > 0 ? line : " "}
           </Text>
         ) : (
@@ -1178,12 +1531,12 @@ function TranscriptSection({ entry }: { entry: InkUiEntry }) {
 function LiveActivitySection({ label }: { label: string }) {
   return (
     <Box marginBottom={1} flexDirection="column">
-      <Text color="gray">doing</Text>
+      <Text color={UI_COLORS.muted}>doing</Text>
       <Box>
-        <Text color="cyan">
+        <Text color={UI_COLORS.accent}>
           <Spinner type="dots" />
         </Text>
-        <Text color="gray"> {label}</Text>
+        <Text color={UI_COLORS.muted}> {label}</Text>
       </Box>
     </Box>
   );
@@ -1200,7 +1553,8 @@ function cloneSession(session: SessionState): SessionState {
     messages: [...session.messages],
     referencedFiles: [...session.referencedFiles],
     readFiles: [...session.readFiles],
-    pinnedSkills: [...session.pinnedSkills]
+    pinnedSkills: [...session.pinnedSkills],
+    edits: session.edits.map((edit) => ({ ...edit }))
   };
 }
 
@@ -1208,7 +1562,7 @@ function formatSessionList(sessions: SessionListItem[]): string {
   return sessions.length > 0
     ? sessions
         .slice(0, 10)
-        .map((item) => `${item.id}  ${item.updatedAt}  ${item.workspaceRoot}`)
+        .map((item) => `${item.id}  ${item.provider}/${item.model}  ${item.updatedAt}  ${item.workspaceRoot}`)
         .join("\n")
     : "(no sessions)";
 }
@@ -1218,7 +1572,7 @@ function formatTimestamp(value: string): string {
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 }
 
-function describeAuth(config: EffectiveConfig): string {
+function describeAuth(config: EffectiveConfig["providers"][ProviderName]): string {
   switch (config.authSource) {
     case "env":
       return `${renderAuthMode(config.authMode)} from env`;
@@ -1233,7 +1587,11 @@ function describeAuth(config: EffectiveConfig): string {
   }
 }
 
-function formatReasoningEffort(value: ReasoningEffort | null): string {
+function formatReasoningEffort(value: ReasoningEffort | null, provider: ProviderName): string {
+  if (!getProviderDefinition(provider).supportsReasoningEffort) {
+    return "provider default (model-specific)";
+  }
+
   return value ?? "(none)";
 }
 
@@ -1242,15 +1600,17 @@ function describeSkills(pinnedCount: number): string {
 }
 
 function formatModelSetupSummary(
-  state: Pick<AuthInputState, "model" | "reasoningEffort">,
+  state: Pick<AuthInputState, "provider" | "model" | "reasoningEffort">,
   config: EffectiveConfig,
   authRetention?: Exclude<AuthRetentionChoice, "cancel">
 ): string {
+  const profile = providerConfigFor(config, state.provider);
   const lines = [
+    `Provider: ${providerLabel(state.provider)}`,
     `Model: ${state.model}`,
-    `Reasoning effort: ${formatReasoningEffort(state.reasoningEffort)}`,
-    `Credential: ${describeAuth(config)}`,
-    `Stored SHA-256: ${config.authFingerprint?.slice(0, 16) ?? "(none)"}`
+    `Reasoning effort: ${formatReasoningEffort(state.reasoningEffort, state.provider)}`,
+    `Credential: ${describeAuth(profile)}`,
+    `Stored SHA-256: ${profile.authFingerprint?.slice(0, 16) ?? "(none)"}`
   ];
 
   if (authRetention === "persist") {
@@ -1282,6 +1642,24 @@ function summarizeUserPrompt(prompt: string): string {
   return [
     `Pasted content: ${prompt.length} chars, ${lineCount} lines`,
     `Preview: ${preview}${preview.length < prompt.replace(/\s+/g, " ").trim().length ? "..." : ""}`
+  ].join("\n");
+}
+
+function renderLiveAssistantBuffer(buffer: string): string {
+  if (!buffer) {
+    return "";
+  }
+
+  const lines = buffer.split("\n");
+
+  if (lines.length <= MAX_LIVE_ASSISTANT_LINES) {
+    return buffer;
+  }
+
+  const hiddenLineCount = lines.length - MAX_LIVE_ASSISTANT_LINES;
+  return [
+    `[${hiddenLineCount} earlier line${hiddenLineCount === 1 ? "" : "s"} hidden while streaming]`,
+    ...lines.slice(-MAX_LIVE_ASSISTANT_LINES)
   ].join("\n");
 }
 
@@ -1322,19 +1700,19 @@ function maskSecretPreview(value: string): string {
 function entryColor(kind: InkEntryKind) {
   switch (kind) {
     case "assistant":
-      return "cyan";
+      return UI_COLORS.accent;
     case "user":
-      return "green";
+      return undefined;
     case "tool":
-      return "magenta";
+      return UI_COLORS.accent;
     case "activity":
-      return "gray";
+      return UI_COLORS.muted;
     case "info":
-      return "blue";
+      return UI_COLORS.accent;
     case "warn":
-      return "yellow";
+      return UI_COLORS.warning;
     case "error":
-      return "red";
+      return UI_COLORS.danger;
   }
 }
 
@@ -1357,30 +1735,26 @@ function entryLabel(kind: InkEntryKind) {
   }
 }
 
-function transcriptCardBorder(entries: InkUiEntry[]): "white" | "red" | "yellow" | "magenta" | "blue" | "cyan" | "gray" {
+function transcriptCardBorder(entries: InkUiEntry[]): "gray" | "red" | "yellow" | "blue" {
   if (entries.some((entry) => entry.kind === "error")) {
-    return "red";
+    return UI_COLORS.danger;
   }
 
   if (entries.some((entry) => entry.kind === "warn")) {
-    return "yellow";
+    return UI_COLORS.warning;
   }
 
   if (entries.some((entry) => entry.kind === "tool")) {
-    return "magenta";
-  }
-
-  if (entries.some((entry) => entry.kind === "assistant")) {
-    return "white";
+    return UI_COLORS.accent;
   }
 
   if (entries.some((entry) => entry.kind === "info")) {
-    return "blue";
+    return UI_COLORS.accent;
   }
 
   if (entries.some((entry) => entry.kind === "activity")) {
-    return "gray";
+    return UI_COLORS.muted;
   }
 
-  return "white";
+  return UI_COLORS.border;
 }

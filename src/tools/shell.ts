@@ -21,6 +21,7 @@ const READ_ONLY_COMMANDS = new Set([
 ]);
 
 const ALLOWED_GIT_SUBCOMMANDS = new Set(["branch", "diff", "log", "rev-parse", "show", "status"]);
+const MAX_SHELL_TIMEOUT_MS = 300_000;
 
 export function createShellTools(): ToolSpec[] {
   return [runShellTool, bashTool];
@@ -35,6 +36,10 @@ const runShellTool: ToolSpec = {
       command: {
         type: "string",
         description: "Shell command to execute."
+      },
+      timeout_ms: {
+        type: "integer",
+        description: "Optional command timeout in milliseconds. Use this for slower builds/tests. Maximum 300000."
       }
     },
     required: ["command"],
@@ -44,6 +49,7 @@ const runShellTool: ToolSpec = {
   async execute(rawArgs, context) {
     const args = expectObject(rawArgs);
     const command = requiredString(args.command, "command");
+    const timeoutMs = optionalTimeoutMs(args.timeout_ms);
 
     if (!isReadOnlyCommand(command)) {
       const approved = await context.approvals.requestApproval({
@@ -61,13 +67,21 @@ const runShellTool: ToolSpec = {
       }
     }
 
-    const result = await runShellCommand(command, { cwd: context.workspaceRoot });
+    const result = await runShellCommand(command, {
+      cwd: context.workspaceRoot,
+      ...(timeoutMs ? { timeoutMs } : {})
+    });
     const rendered = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+    const summary = result.timedOut
+      ? `Command timed out after ${timeoutMs ?? 30_000} ms`
+      : result.signal
+        ? `Command terminated by signal ${result.signal}`
+        : `Command finished with exit code ${result.exitCode ?? "null"}`;
 
     return {
-      summary: `Command finished with exit code ${result.exitCode ?? "null"}`,
+      summary,
       content: rendered || "(no output)",
-      isError: (result.exitCode ?? 1) !== 0
+      isError: result.timedOut || (result.exitCode ?? 1) !== 0
     };
   }
 };
@@ -112,4 +126,16 @@ function requiredString(value: unknown, key: string): string {
   }
 
   throw new Error(`Missing string argument: ${key}`);
+}
+
+function optionalTimeoutMs(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isInteger(value) || typeof value !== "number" || value <= 0) {
+    throw new Error("timeout_ms must be a positive integer.");
+  }
+
+  return Math.min(value, MAX_SHELL_TIMEOUT_MS);
 }

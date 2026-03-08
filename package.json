@@ -1,9 +1,19 @@
 {
   "name": "@vetala/vetala",
-  "version": "0.1.0-dev",
+  "version": "0.2.0-dev",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Terminal-first AI coding CLI with tools, memory, and local skills.",
+  "keywords": [
+    "ai",
+    "cli",
+    "terminal",
+    "tui",
+    "coding-assistant",
+    "developer-tools",
+    "openrouter",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bymehul/vetala.git"

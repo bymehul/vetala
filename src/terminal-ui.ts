@@ -2,7 +2,9 @@ import { stripVTControlCharacters } from "node:util";
 import chalk from "chalk";
 import gradient from "gradient-string";
 import ora, { Ora } from "ora";
-import type { EffectiveConfig, SessionState, ToolCall } from "./types.js";
+import { APP_NAME, APP_TAGLINE, APP_VERSION } from "./app-meta.js";
+import { formatRuntimeHostSummary, formatRuntimeTerminalSummary } from "./runtime-profile.js";
+import type { EffectiveConfig, RuntimeHostProfile, SessionState, ToolCall } from "./types.js";
 
 const BORDER = {
   topLeft: "┌",
@@ -16,10 +18,12 @@ const BORDER = {
 export class TerminalUI {
   private assistantLineOpen = false;
 
+  constructor(protected readonly runtimeProfile: RuntimeHostProfile) {}
+
   printBanner(): void {
     this.endAssistantTurn();
     console.log(
-      gradient(["#ef8e38", "#f4c95d"])("Vetala") + chalk.dim("  sarvam-powered coding cli")
+      gradient(["#5d7285", "#91a4b5"])(APP_NAME) + chalk.dim(`  ${APP_TAGLINE}`)
     );
   }
 
@@ -30,10 +34,11 @@ export class TerminalUI {
     console.log();
     console.log(
       this.renderSplitPanel(
-        `Vetala ${chalk.dim("(v0.1.0)")}`,
+        `${APP_NAME} ${chalk.dim(`(${APP_VERSION})`)}`,
         [
           chalk.bold("Welcome back!"),
           "",
+          `provider:  ${session.provider}`,
           `model:     ${session.model}`,
           `directory: ${session.workspaceRoot}`,
           `session:   ${session.id.slice(0, 8)}`,
@@ -152,12 +157,15 @@ export class TerminalUI {
       this.renderPanel("Config", [
         `config:  ${config.configPath}`,
         `data:    ${config.dataPath}`,
+        `provider: ${config.defaultProvider}`,
         `auth:    ${config.authMode} (${config.authSource})`,
         `sha256:  ${config.authFingerprint?.slice(0, 12) ?? "(none)"}`,
         `model:   ${config.defaultModel}`,
         `reason:  ${config.reasoningEffort ?? "(none)"}`,
         `search:  ${config.searchProviderName}`,
-        `base:    ${config.baseUrl}`
+        `base:    ${config.baseUrl}`,
+        `host:    ${formatRuntimeHostSummary(this.runtimeProfile)}`,
+        `term:    ${formatRuntimeTerminalSummary(this.runtimeProfile)}`
       ])
     );
   }

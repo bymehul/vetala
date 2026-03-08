@@ -16,6 +16,7 @@ interface RootCommand {
 const ROOT_COMMANDS: RootCommand[] = [
   { name: "help", completion: "/help", detail: "Show known commands" },
   { name: "model", completion: "/model", detail: "Model, reasoning, and auth settings" },
+  { name: "undo", completion: "/undo", detail: "Revert the last tracked file edit" },
   { name: "skill", completion: "/skill", detail: "List, pin, inspect, and read local skills", aliases: ["skills"] },
   { name: "tools", completion: "/tools", detail: "List available tools" },
   { name: "history", completion: "/history", detail: "Show recent message history" },

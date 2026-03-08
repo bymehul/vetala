@@ -4,6 +4,7 @@ import { createGitTools } from "./git.js";
 import { ToolRegistry } from "./registry.js";
 import { createShellTools } from "./shell.js";
 import { createSkillTools } from "./skill.js";
+import { createTimingTools } from "./timing.js";
 import { createWebToolsForConfig } from "./web.js";
 
 export function createToolRegistry(options: {
@@ -16,6 +17,7 @@ export function createToolRegistry(options: {
   for (const tool of [
     ...createFilesystemTools(),
     ...createShellTools(),
+    ...createTimingTools(),
     ...createGitTools(),
     ...(options.skillRuntime ? createSkillTools(options.skillRuntime) : []),
     ...createWebToolsForConfig(includeWebSearch)

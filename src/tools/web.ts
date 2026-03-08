@@ -1,14 +1,15 @@
+import { createSearchProvider, normalizeSearchProviderName } from "../search-provider.js";
 import type { ToolContext, ToolSpec } from "../types.js";
 
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_FETCH_CONTENT = 12_000;
 
 export function createWebTools(): ToolSpec[] {
-  return [fetchUrlTool, webSearchTool];
+  return [fetchUrlTool, webSearchTool, stackOverflowSearchTool];
 }
 
 export function createWebToolsForConfig(includeSearchTool: boolean): ToolSpec[] {
-  return includeSearchTool ? [fetchUrlTool, webSearchTool] : [fetchUrlTool];
+  return includeSearchTool ? [fetchUrlTool, webSearchTool, stackOverflowSearchTool] : [fetchUrlTool];
 }
 
 const fetchUrlTool: ToolSpec = {
@@ -70,13 +71,65 @@ const fetchUrlTool: ToolSpec = {
 
 const webSearchTool: ToolSpec = {
   name: "web_search",
-  description: "Search the web through the configured search provider after web access is approved.",
+  description: "Search the web after web access is approved. Uses the configured provider by default and can be overridden per query.",
   jsonSchema: {
     type: "object",
     properties: {
       query: {
         type: "string",
         description: "Search query."
+      },
+      limit: {
+        type: "integer",
+        description: "Maximum number of results to return. Defaults to 5."
+      },
+      provider: {
+        type: "string",
+        description: "Optional override provider: duckduckgo, brave, bing, or stack_overflow."
+      }
+    },
+    required: ["query"],
+    additionalProperties: false
+  },
+  readOnly: true,
+  async execute(rawArgs, context) {
+    const args = expectObject(rawArgs);
+    const query = requiredString(args.query, "query");
+    const limit = typeof args.limit === "number" && Number.isInteger(args.limit) ? args.limit : 5;
+    const provider = resolveSearchProvider(args.provider, context);
+
+    if (!await context.approvals.ensureWebAccess()) {
+      return denied("Web access denied.");
+    }
+
+    try {
+      const results = await provider.search(query, limit);
+      return {
+        summary: `Returned ${results.length} search results from ${provider.name}`,
+        content: results
+          .map((result, index) => `${index + 1}. ${result.title}\n${result.url}\n${result.snippet}`)
+          .join("\n\n"),
+        isError: false
+      };
+    } catch (error) {
+      return {
+        summary: "Search provider error",
+        content: error instanceof Error ? error.message : String(error),
+        isError: true
+      };
+    }
+  }
+};
+
+const stackOverflowSearchTool: ToolSpec = {
+  name: "stack_overflow_search",
+  description: "Search Stack Overflow for programming questions after web access is approved.",
+  jsonSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Programming search query."
       },
       limit: {
         type: "integer",
@@ -97,9 +150,10 @@ const webSearchTool: ToolSpec = {
     }
 
     try {
-      const results = await context.searchProvider.search(query, limit);
+      const provider = createSearchProvider("stack_overflow");
+      const results = await provider.search(query, limit);
       return {
-        summary: `Returned ${results.length} search results`,
+        summary: `Returned ${results.length} Stack Overflow results`,
         content: results
           .map((result, index) => `${index + 1}. ${result.title}\n${result.url}\n${result.snippet}`)
           .join("\n\n"),
@@ -107,7 +161,7 @@ const webSearchTool: ToolSpec = {
       };
     } catch (error) {
       return {
-        summary: "Search provider error",
+        summary: "Stack Overflow search error",
         content: error instanceof Error ? error.message : String(error),
         isError: true
       };
@@ -137,6 +191,24 @@ function denied(message: string) {
     content: message,
     isError: true
   };
+}
+
+function resolveSearchProvider(value: unknown, context: ToolContext) {
+  if (typeof value === "string" && value.trim().length > 0) {
+    const override = normalizeSearchProviderName(value);
+
+    if (!override) {
+      throw new Error(`Unknown search provider: ${value}`);
+    }
+
+    if (override === "disabled") {
+      return context.searchProvider;
+    }
+
+    return createSearchProvider(override);
+  }
+
+  return context.searchProvider;
 }
 
 function renderFetchedBody(body: string, contentType: string): string {

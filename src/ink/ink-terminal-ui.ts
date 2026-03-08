@@ -1,6 +1,7 @@
 import type { Ora } from "ora";
 import { TerminalUI } from "../terminal-ui.js";
-import type { EffectiveConfig, SessionState, ToolCall } from "../types.js";
+import { formatRuntimeHostSummary, formatRuntimeTerminalSummary } from "../runtime-profile.js";
+import type { EffectiveConfig, RuntimeHostProfile, SessionState, ToolCall } from "../types.js";
 
 export type InkEntryKind = "assistant" | "user" | "tool" | "info" | "warn" | "error" | "activity";
 
@@ -19,8 +20,11 @@ interface InkUiBridge {
 }
 
 export class InkTerminalUI extends TerminalUI {
-  constructor(private readonly bridge: InkUiBridge) {
-    super();
+  constructor(
+    private readonly bridge: InkUiBridge,
+    runtimeProfile: RuntimeHostProfile
+  ) {
+    super(runtimeProfile);
   }
 
   override printBanner(): void {}
@@ -104,12 +108,15 @@ export class InkTerminalUI extends TerminalUI {
       [
         `config:  ${config.configPath}`,
         `data:    ${config.dataPath}`,
+        `provider: ${config.defaultProvider}`,
         `auth:    ${config.authMode} (${config.authSource})`,
         `sha256:  ${config.authFingerprint?.slice(0, 12) ?? "(none)"}`,
         `model:   ${config.defaultModel}`,
         `reason:  ${config.reasoningEffort ?? "(none)"}`,
         `search:  ${config.searchProviderName}`,
-        `base:    ${config.baseUrl}`
+        `base:    ${config.baseUrl}`,
+        `host:    ${formatRuntimeHostSummary(this.runtimeProfile)}`,
+        `term:    ${formatRuntimeTerminalSummary(this.runtimeProfile)}`
       ].join("\n")
     );
   }

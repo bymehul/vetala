@@ -1,16 +1,18 @@
 import { ApprovalManager } from "./approvals.js";
 import { compactConversation } from "./context-memory.js";
 import { PathPolicy } from "./path-policy.js";
-import { DisabledSearchProvider } from "./search-provider.js";
+import { createProviderClient, getProviderDefinition, providerLabel, withSystemMessage } from "./providers/index.js";
+import { createSearchProvider } from "./search-provider.js";
 import { SessionStore } from "./session-store.js";
-import { SarvamClient, withSystemMessage } from "./sarvam/client.js";
 import { TerminalUI } from "./terminal-ui.js";
 import { ToolRegistry } from "./tools/registry.js";
+import type { ChatProviderClient, ProviderRequestOptions } from "./providers/index.js";
 import type { SkillRuntime } from "./skills/runtime.js";
 import type {
   ChatMessage,
   EffectiveConfig,
   PersistedMessage,
+  RuntimeHostProfile,
   SessionState,
   StreamedAssistantTurn,
   ToolContext
@@ -22,23 +24,32 @@ export interface AgentOptions {
   sessionStore: SessionStore;
   approvals: ApprovalManager;
   pathPolicy: PathPolicy;
+  runtimeProfile: RuntimeHostProfile;
   skills: SkillRuntime;
   tools: ToolRegistry;
   ui: TerminalUI;
 }
 
 export class Agent {
-  private readonly client: SarvamClient;
+  private readonly client: ChatProviderClient;
+  private activeRequestController: AbortController | null = null;
+  private stopRequested = false;
 
   constructor(private readonly options: AgentOptions) {
-    this.client = new SarvamClient(options.config);
+    this.client = createProviderClient(options.config.providers[options.session.provider]);
   }
 
   get session(): SessionState {
     return this.options.session;
   }
 
+  requestStop(): void {
+    this.stopRequested = true;
+    this.activeRequestController?.abort();
+  }
+
   async runTurn(userInput: string, streaming: boolean): Promise<void> {
+    this.stopRequested = false;
     const userMessage = this.persistedMessage({
       role: "user",
       content: userInput
@@ -52,11 +63,14 @@ export class Agent {
       return;
     }
 
-    if (!this.options.config.authValue) {
+    const provider = this.options.config.providers[this.options.session.provider];
+    const providerDefinition = getProviderDefinition(this.options.session.provider);
+
+    if (!provider.authValue) {
       const missingAuthMessage =
-        this.options.config.authSource === "stored_hash"
-          ? "A stored SHA-256 fingerprint exists, but the raw Sarvam key is not available in this process. Use /model to enter the key again or set SARVAM_API_KEY, SARVAM_SUBSCRIPTION_KEY, or SARVAM_TOKEN."
-          : "Sarvam credentials are missing. Set SARVAM_API_KEY, SARVAM_SUBSCRIPTION_KEY, or SARVAM_TOKEN and try again.";
+        provider.authSource === "stored_hash"
+          ? `A stored SHA-256 fingerprint exists for ${providerDefinition.label}, but the raw credential is not available in this process. Use /model to enter the key again or set ${providerDefinition.auth.envVars.join(", ")}.`
+          : `${providerDefinition.label} credentials are missing. Set ${providerDefinition.auth.envVars.join(", ")} and try again.`;
 
       await this.appendAndRenderAssistantMessage(
         missingAuthMessage,
@@ -68,6 +82,7 @@ export class Agent {
     const seenToolCalls = new Set<string>();
 
     for (let turnIndex = 0; turnIndex < 8; turnIndex += 1) {
+      this.throwIfStopped();
       const conversation = compactConversation(
         this.options.session.messages,
         this.options.session.referencedFiles
@@ -87,6 +102,11 @@ export class Agent {
       try {
         turn = await this.completeTurn(requestMessages, streaming);
       } catch (error) {
+        if (isAbortError(error) || error instanceof AgentInterruptedError) {
+          this.options.ui.endAssistantTurn();
+          throw new AgentInterruptedError();
+        }
+
         await this.appendAndRenderAssistantMessage(
           error instanceof Error ? error.message : String(error),
           true
@@ -107,6 +127,7 @@ export class Agent {
       }
 
       for (const toolCall of turn.toolCalls) {
+        this.throwIfStopped();
         this.options.ui.printToolCall(toolCall);
         const signature = toolCallSignature(toolCall);
         let result;
@@ -124,6 +145,7 @@ export class Agent {
           result = await this.options.tools.execute(toolCall, this.toolContext());
         }
 
+        this.throwIfStopped();
         this.options.ui.printToolResult(result.summary, result.isError);
         await this.options.sessionStore.appendMessage(
           this.options.session,
@@ -140,13 +162,14 @@ export class Agent {
   }
 
   private async completeTurn(messages: ChatMessage[], streaming: boolean): Promise<StreamedAssistantTurn> {
-    this.options.ui.activity(`Thinking with ${this.options.session.model}.`);
+    this.options.ui.activity(`Thinking with ${providerLabel(this.options.session.provider)} / ${this.options.session.model}.`);
+    const requestOptions = this.beginRequest();
 
     if (!streaming) {
       const spinner = this.options.ui.startSpinner("Thinking");
 
       try {
-        const turn = await this.client.complete(this.chatRequest(messages));
+        const turn = await this.client.complete(this.chatRequest(messages), requestOptions);
 
         spinner.stop();
         if (turn.content) {
@@ -154,7 +177,14 @@ export class Agent {
         }
 
         return turn;
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw new AgentInterruptedError();
+        }
+
+        throw error;
       } finally {
+        this.endRequest(requestOptions);
         if (spinner.isSpinning) {
           spinner.stop();
         }
@@ -166,10 +196,16 @@ export class Agent {
         this.chatRequest(messages),
         {
           onText: (chunk) => this.options.ui.appendAssistantText(chunk)
-        }
+        },
+        requestOptions
       );
       return turn;
     } catch (error) {
+      if (isAbortError(error)) {
+        this.options.ui.endAssistantTurn();
+        throw new AgentInterruptedError();
+      }
+
       this.options.ui.endAssistantTurn();
       this.options.ui.activity("Streaming failed. Retrying with buffered completion.");
       this.options.ui.warn(
@@ -177,6 +213,8 @@ export class Agent {
       );
 
       return this.completeTurn(messages, false);
+    } finally {
+      this.endRequest(requestOptions);
     }
   }
 
@@ -185,7 +223,9 @@ export class Agent {
       messages,
       model: this.options.session.model,
       temperature: 0.2,
-      reasoning_effort: this.options.config.reasoningEffort,
+      reasoning_effort: getProviderDefinition(this.options.session.provider).supportsReasoningEffort
+        ? this.options.config.reasoningEffort
+        : null,
       tools: this.options.tools.toSarvamTools(),
       tool_choice: "auto" as const
     };
@@ -205,13 +245,16 @@ export class Agent {
         hasRead: (targetPath) => this.options.session.readFiles.includes(targetPath),
         registerRead: (targetPath) => this.options.sessionStore.appendReadFile(this.options.session, targetPath)
       },
+      edits: {
+        recordEdit: (edit) => this.options.sessionStore.appendEdit(this.options.session, edit)
+      },
       paths: {
         resolve: (inputPath) => this.options.pathPolicy.resolve(inputPath),
         ensureReadable: (inputPath) => this.options.pathPolicy.ensureReadable(inputPath),
         ensureWritable: (inputPath) => this.options.pathPolicy.ensureWritable(inputPath),
         allowedRoots: () => this.options.pathPolicy.allowedRoots()
       },
-      searchProvider: new DisabledSearchProvider()
+      searchProvider: createSearchProvider(this.options.config.searchProviderName)
     };
   }
 
@@ -245,16 +288,28 @@ export class Agent {
       "You are Vetala, a concise coding CLI assistant operating inside a developer terminal.",
       "When greeting or introducing yourself, explicitly call yourself Vetala.",
       "When referring to yourself in any response, use the name Vetala.",
-      `Host platform: ${process.platform}`,
-      "Account for the host platform when suggesting or running shell commands.",
+      `Host platform: ${this.options.runtimeProfile.platform}`,
+      `Host architecture: ${this.options.runtimeProfile.arch}`,
+      `Host release: ${this.options.runtimeProfile.release}`,
+      `Host OS version: ${this.options.runtimeProfile.osVersion}`,
+      `Detected shell: ${this.options.runtimeProfile.shell}`,
+      `Detected terminal: ${this.options.runtimeProfile.terminalProgram} / ${this.options.runtimeProfile.terminalType}`,
+      `TTY: stdin=${this.options.runtimeProfile.stdinIsTTY ? "yes" : "no"}, stdout=${this.options.runtimeProfile.stdoutIsTTY ? "yes" : "no"}, size=${formatViewport(this.options.runtimeProfile)}`,
+      "Account for the host platform, shell, and terminal when suggesting or running commands.",
       `Workspace root: ${this.options.session.workspaceRoot}`,
+      `Active provider: ${providerLabel(this.options.session.provider)}`,
+      `Active model: ${this.options.session.model}`,
       `Allowed roots right now: ${this.options.pathPolicy.allowedRoots().join(", ")}`,
       compactedCount > 0
         ? `Only the most recent messages are attached verbatim. ${compactedCount} earlier messages were compacted into working memory.`
         : "The full conversation is attached because the session is still short.",
       "Use tools whenever you need file contents, shell output, git state, or web data.",
+      "If you are unsure about a current or factual claim, use web_search or stack_overflow_search instead of guessing.",
+      "For programming questions on the web, prefer stack_overflow_search before broader search when appropriate.",
       "Only call declared tools by their exact names.",
       "Preferred repo workflow: search_repo, then read_file/read_file_chunk/read_symbol, then apply_patch or write_file.",
+      "If a command or background process needs time before the next check, use sleep instead of guessing.",
+      "If a build, test, or install command may take longer than usual, set run_shell.timeout_ms explicitly.",
       "Do not edit an existing file until you have read it in this session.",
       "Use the skill tool whenever a task may match a local skill or when you need a skill-specific file.",
       "When reading files inside the local skill catalog, prefer the skill tool over read_file.",
@@ -279,6 +334,35 @@ export class Agent {
 
     return lines.join("\n");
   }
+
+  private beginRequest(): ProviderRequestOptions {
+    const controller = new AbortController();
+    this.activeRequestController = controller;
+    return { signal: controller.signal };
+  }
+
+  private endRequest(options: ProviderRequestOptions): void {
+    if (this.activeRequestController?.signal === options.signal) {
+      this.activeRequestController = null;
+    }
+  }
+
+  private throwIfStopped(): void {
+    if (this.stopRequested) {
+      throw new AgentInterruptedError();
+    }
+  }
+}
+
+export class AgentInterruptedError extends Error {
+  constructor() {
+    super("The current turn was interrupted.");
+    this.name = "AgentInterruptedError";
+  }
+}
+
+export function isAgentInterruptedError(error: unknown): error is AgentInterruptedError {
+  return error instanceof AgentInterruptedError;
 }
 
 function toolCallSignature(toolCall: StreamedAssistantTurn["toolCalls"][number]): string {
@@ -293,4 +377,12 @@ function maybeLocalGreeting(userInput: string): string | null {
   }
 
   return null;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function formatViewport(profile: RuntimeHostProfile): string {
+  return profile.columns && profile.rows ? `${profile.columns}x${profile.rows}` : "unknown";
 }

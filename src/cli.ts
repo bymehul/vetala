@@ -5,37 +5,53 @@ import { stdin, stdout } from "node:process";
 import { Command } from "commander";
 import { Agent } from "./agent.js";
 import { ApprovalManager } from "./approvals.js";
+import { APP_VERSION } from "./app-meta.js";
 import { loadConfig } from "./config.js";
 import { PathPolicy } from "./path-policy.js";
+import { resolveProviderName } from "./providers/index.js";
+import { detectRuntimeHostProfile } from "./runtime-profile.js";
 import { SessionStore } from "./session-store.js";
 import { SkillRuntime } from "./skills/runtime.js";
 import { TerminalUI } from "./terminal-ui.js";
 import { createToolRegistry } from "./tools/index.js";
-import type { SessionState } from "./types.js";
+import type { ProviderName, SessionState } from "./types.js";
 import { ensureWorkspaceTrust } from "./workspace-trust.js";
 
 const program = new Command();
 
 program
   .name("vetala")
-  .description("Sarvam-powered coding CLI.")
+  .version(APP_VERSION)
+  .description("Multi-provider coding CLI.")
   .option("-p, --prompt <prompt>", "Run a single prompt and exit")
   .option("--new", "Start a fresh session")
   .option("--resume <sessionId>", "Resume a specific session")
+  .option("--provider <provider>", "Override the provider for this run")
   .option("--model <model>", "Override the model for this run")
   .action(async (options) => {
     let config = await loadConfig();
-    const ui = new TerminalUI();
+    const runtimeProfile = detectRuntimeHostProfile();
+    const ui = new TerminalUI(runtimeProfile);
     const store = new SessionStore();
     const workspaceRoot = process.cwd();
-    let session = await resolveSession(store, workspaceRoot, config.defaultModel, options);
+    let session = await resolveSession(store, workspaceRoot, config.defaultProvider, config.defaultModel, options);
 
     if (session.workspaceRoot !== process.cwd()) {
       process.chdir(session.workspaceRoot);
     }
 
-    if (options.model && options.model !== session.model) {
-      await store.updateModel(session, options.model);
+    const overrideProvider = resolveProviderOption(options.provider);
+    if (options.provider && !overrideProvider) {
+      throw new Error(`Unknown provider: ${options.provider}`);
+    }
+
+    if (overrideProvider || options.model) {
+      const nextProvider = overrideProvider ?? session.provider;
+      const nextModel = options.model ?? config.providers[nextProvider].defaultModel;
+
+      if (nextProvider !== session.provider || nextModel !== session.model) {
+        await store.updateModel(session, nextProvider, nextModel);
+      }
     }
 
     if (options.prompt) {
@@ -47,12 +63,12 @@ program
       }
 
       config = trustedConfig;
-      await runOneShot(options.prompt, session, config, store, ui);
+      await runOneShot(options.prompt, session, config, store, ui, runtimeProfile);
       return;
     }
 
     const { startRepl } = await import("./repl.js");
-    await startRepl(session, { ui, store });
+    await startRepl(session, { ui, store, runtimeProfile });
   });
 
 await program.parseAsync(process.argv);
@@ -60,6 +76,7 @@ await program.parseAsync(process.argv);
 async function resolveSession(
   store: SessionStore,
   workspaceRoot: string,
+  defaultProvider: ProviderName,
   defaultModel: string,
   options: { new?: boolean; resume?: string }
 ): Promise<SessionState> {
@@ -67,7 +84,7 @@ async function resolveSession(
     return store.loadSession(options.resume);
   }
 
-  return store.createSession(workspaceRoot, defaultModel);
+  return store.createSession(workspaceRoot, defaultProvider, defaultModel);
 }
 
 async function runOneShot(
@@ -75,7 +92,8 @@ async function runOneShot(
   session: SessionState,
   config: Awaited<ReturnType<typeof loadConfig>>,
   store: SessionStore,
-  ui: TerminalUI
+  ui: TerminalUI,
+  runtimeProfile: ReturnType<typeof detectRuntimeHostProfile>
 ): Promise<void> {
   const rl = stdin.isTTY
     ? readline.createInterface({
@@ -97,6 +115,7 @@ async function runOneShot(
       sessionStore: store,
       approvals,
       pathPolicy: new PathPolicy(session.workspaceRoot, approvals),
+      runtimeProfile,
       skills,
       tools: createToolRegistry({
         includeWebSearch: config.searchProviderName !== "disabled",
@@ -109,4 +128,8 @@ async function runOneShot(
   } finally {
     await rl?.close();
   }
+}
+
+function resolveProviderOption(value: string | undefined): ProviderName | undefined {
+  return resolveProviderName(value);
 }

@@ -4,11 +4,12 @@ import { loadConfig } from "./config.js";
 import { ReplApp } from "./ink/repl-app.js";
 import { SessionStore } from "./session-store.js";
 import { TerminalUI } from "./terminal-ui.js";
-import type { SessionState } from "./types.js";
+import type { RuntimeHostProfile, SessionState } from "./types.js";
 
 interface ReplDependencies {
   ui: TerminalUI;
   store: SessionStore;
+  runtimeProfile: RuntimeHostProfile;
 }
 
 export async function startRepl(initialSession: SessionState, dependencies: ReplDependencies): Promise<void> {
@@ -18,6 +19,7 @@ export async function startRepl(initialSession: SessionState, dependencies: Repl
     <ReplApp
       initialConfig={config}
       initialSession={initialSession}
+      runtimeProfile={dependencies.runtimeProfile}
       store={dependencies.store}
     />,
     {
