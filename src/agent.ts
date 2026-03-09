@@ -142,10 +142,15 @@ export class Agent {
         } else {
           seenToolCalls.add(signature);
           this.options.ui.activity(`Running ${toolCall.function.name}.`);
+          const toolSpec = this.options.tools.getTool(toolCall.function.name);
+          const isMutating = toolSpec && !toolSpec.readOnly;
+          
           result = await this.options.tools.execute(toolCall, this.toolContext());
 
           if (result.isError) {
             seenToolCalls.delete(signature);
+          } else if (isMutating) {
+            seenToolCalls.clear();
           }
         }
 

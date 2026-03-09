@@ -7,6 +7,10 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  getTool(name: string): ToolSpec | undefined {
+    return this.tools.get(name);
+  }
+
   list(): ToolSpec[] {
     return [...this.tools.values()].sort((left, right) => left.name.localeCompare(right.name));
   }
