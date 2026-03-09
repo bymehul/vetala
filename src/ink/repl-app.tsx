@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, Static } from "ink";
 import SelectInput from "ink-select-input";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
@@ -41,9 +41,7 @@ import type {
 import { InkTerminalUI, type InkEntryKind, type InkUiEntry } from "./ink-terminal-ui.js";
 import { buildSlashSuggestions } from "./command-suggestions.js";
 
-const ASSISTANT_FLUSH_INTERVAL_MS = 33;
 const MAX_LIVE_ASSISTANT_LINES = 24;
-const MAX_VISIBLE_TRANSCRIPT_TURNS = 6;
 const UI_COLORS = {
   accent: "blue",
   muted: "gray",
@@ -122,12 +120,10 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
   const [turnRunning, setTurnRunning] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState<AvailableAppUpdate | null>(null);
   const assistantBufferRef = useRef("");
-  const assistantFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nextEntryIdRef = useRef(0);
   const queuedPromptRef = useRef<string | null>(null);
   const sessionRef = useRef(session);
   const turnRunningRef = useRef(false);
-  const updateCheckStartedRef = useRef(false);
   const uiRef = useRef<InkTerminalUI | null>(null);
   const skillRuntimeRef = useRef<SkillRuntime | null>(null);
   const activeAgentRef = useRef<Agent | null>(null);
@@ -145,28 +141,8 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
     ]);
   };
 
-  const flushAssistantBuffer = () => {
-    if (assistantFlushTimerRef.current) {
-      clearTimeout(assistantFlushTimerRef.current);
-      assistantFlushTimerRef.current = null;
-    }
-
-    setAssistantBuffer(assistantBufferRef.current);
-  };
-
-  const scheduleAssistantFlush = () => {
-    if (assistantFlushTimerRef.current) {
-      return;
-    }
-
-    assistantFlushTimerRef.current = setTimeout(() => {
-      assistantFlushTimerRef.current = null;
-      setAssistantBuffer(assistantBufferRef.current);
-    }, ASSISTANT_FLUSH_INTERVAL_MS);
-  };
-
   const finalizeAssistant = () => {
-    flushAssistantBuffer();
+    setAssistantBuffer(assistantBufferRef.current);
     const buffered = assistantBufferRef.current.trimEnd();
 
     if (!buffered) {
@@ -184,7 +160,6 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
     uiRef.current = new InkTerminalUI({
       appendAssistant: (text) => {
         assistantBufferRef.current += text;
-        scheduleAssistantFlush();
       },
       finalizeAssistant,
       pushEntry,
@@ -209,8 +184,8 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
   const visibleStatus = paused ? "Paused" : status;
   const visibleAssistantBuffer = renderLiveAssistantBuffer(assistantBuffer);
   const transcriptCards = buildTranscriptCards(entries);
-  const visibleTranscriptCards = transcriptCards.slice(-MAX_VISIBLE_TRANSCRIPT_TURNS);
-  const hiddenTranscriptTurnCount = Math.max(0, transcriptCards.length - visibleTranscriptCards.length);
+  const completedCards = transcriptCards.slice(0, -1);
+  const activeCard = transcriptCards.length > 0 ? transcriptCards[transcriptCards.length - 1] : null;
   const slashSuggestions = buildSlashSuggestions(input, availableSkills).slice(0, 8);
   const showSlashSuggestions = Boolean(
     trusted &&
@@ -257,35 +232,7 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
     };
   }, [skills]);
 
-  useEffect(() => () => {
-    if (assistantFlushTimerRef.current) {
-      clearTimeout(assistantFlushTimerRef.current);
-    }
-  }, []);
 
-  useEffect(() => {
-    if (!trusted || updateCheckStartedRef.current) {
-      return;
-    }
-
-    updateCheckStartedRef.current = true;
-    let cancelled = false;
-
-    void checkForAppUpdate()
-      .then((update) => {
-        if (!cancelled && update) {
-          setPendingUpdatePrompt(update);
-          setStatus(`Update available: ${update.latestVersion}`);
-        }
-      })
-      .catch(() => {
-        // Keep startup quiet if the registry cannot be reached.
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [trusted]);
 
   useInput((inputValue, key) => {
     if (showSlashSuggestions && isTabInput(inputValue, key)) {
@@ -327,7 +274,6 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
   };
 
   const resetTranscript = () => {
-    flushAssistantBuffer();
     assistantBufferRef.current = "";
     setAssistantBuffer("");
     setActivityLabel(null);
@@ -965,7 +911,7 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
       return;
     }
 
-    const loadedConfig = await loadConfig();
+    const loadedConfig = mergeLoadedConfig(await loadConfig());
     const nextConfig =
       choice === "persist"
         ? withProviderStoredAuth(loadedConfig, current.provider, current.authMode, current.value)
@@ -1015,17 +961,11 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
               </Box>
             ) : null}
 
-            {hiddenTranscriptTurnCount > 0 ? (
-              <Box marginBottom={1} borderStyle="round" borderColor={UI_COLORS.border} paddingX={1}>
-                <Text color={UI_COLORS.muted}>
-                  {hiddenTranscriptTurnCount} earlier turn{hiddenTranscriptTurnCount === 1 ? "" : "s"} hidden. Use /history to inspect older messages or /clear to reset the visible transcript.
-                </Text>
-              </Box>
-            ) : null}
+            <Static items={completedCards}>
+              {(card) => <TranscriptTurnCard key={card.id} card={card} />}
+            </Static>
 
-            {visibleTranscriptCards.map((card) => (
-              <TranscriptTurnCard key={card.id} card={card} />
-            ))}
+            {activeCard ? <TranscriptTurnCard key={activeCard.id} card={activeCard} /> : null}
 
             {(assistantBuffer || activityLabel || spinnerLabel) ? (
               <LiveStatusCard

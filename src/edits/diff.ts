@@ -174,7 +174,7 @@ function commonSuffixLength(left: string[], right: string[], prefix: number): nu
   return index;
 }
 
-function lcsDiff(beforeLines: string[], afterLines: string[]): DiffOp[] {
+export function lcsDiff(beforeLines: string[], afterLines: string[]): DiffOp[] {
   const matrix = buildLcsMatrix(beforeLines, afterLines);
   const ops: DiffOp[] = [];
   let leftIndex = beforeLines.length;

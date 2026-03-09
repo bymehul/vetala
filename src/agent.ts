@@ -143,6 +143,10 @@ export class Agent {
           seenToolCalls.add(signature);
           this.options.ui.activity(`Running ${toolCall.function.name}.`);
           result = await this.options.tools.execute(toolCall, this.toolContext());
+
+          if (result.isError) {
+            seenToolCalls.delete(signature);
+          }
         }
 
         this.throwIfStopped();

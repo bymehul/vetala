@@ -1,6 +1,6 @@
 import path from "node:path";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { buildDiffPreview } from "../edits/diff.js";
+import { buildDiffPreview, lcsDiff } from "../edits/diff.js";
 import type { ToolContext, ToolResult, ToolSpec } from "../types.js";
 import { searchRepo, searchRepoSymbol } from "./repo-search.js";
 
@@ -298,7 +298,7 @@ const writeFileTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "write_file",
-      key: `write_file:${target}`,
+      key: `edit_file:${target}`,
       label: [
         "Allow writing file?",
         `path: ${target}`,
@@ -384,7 +384,7 @@ const applyPatchTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "replace_in_file",
-      key: `replace_in_file:${target}`,
+      key: `edit_file:${target}`,
       label: [
         "Allow patching file?",
         `path: ${target}`,
@@ -455,7 +455,7 @@ const replaceInFileTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "replace_in_file",
-      key: `replace_in_file:${target}`,
+      key: `edit_file:${target}`,
       label: [
         "Allow editing file?",
         `path: ${target}`,
@@ -677,12 +677,16 @@ async function writePatchedFile(
     summary
   });
 
+  const beforeLines = original.split("\n");
+  const afterLines = updated.split("\n");
+  const stats = summarizeDiffOps(beforeLines, afterLines);
+
   return {
     summary: `${summary} (${changeCount} change${changeCount === 1 ? "" : "s"}, ${replacements} replacement${replacements === 1 ? "" : "s"})`,
     content: [
       `Applied ${changeCount} change${changeCount === 1 ? "" : "s"} in ${target}.`,
       "",
-      buildDiffPreview(target, original, updated)
+      `changes: +${stats.added} -${stats.removed}`
     ].join("\n"),
     isError: false,
     referencedFiles: [target]
@@ -690,17 +694,37 @@ async function writePatchedFile(
 }
 
 function successWithDiff(target: string, beforeContent: string | null, afterContent: string, summary: string): ToolResult {
+  const beforeLines = beforeContent ? beforeContent.split("\n") : [];
+  const afterLines = afterContent.split("\n");
+  const stats = beforeLines.length === 0 ? { added: afterLines.length, removed: 0 } : summarizeDiffOps(beforeLines, afterLines);
+
   return {
     summary,
     content: [
       `File written successfully:`,
       target,
       "",
-      buildDiffPreview(target, beforeContent, afterContent)
+      `changes: +${stats.added} -${stats.removed}`
     ].join("\n"),
     isError: false,
     referencedFiles: [target]
   };
+}
+
+function summarizeDiffOps(beforeLines: string[], afterLines: string[]): { added: number; removed: number } {
+  const ops = lcsDiff(beforeLines, afterLines);
+  let added = 0;
+  let removed = 0;
+
+  for (const op of ops) {
+    if (op.type === "add") {
+      added += 1;
+    } else if (op.type === "remove") {
+      removed += 1;
+    }
+  }
+
+  return { added, removed };
 }
 
 function stringArray(value: unknown): string[] {
