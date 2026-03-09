@@ -81,7 +81,7 @@ export class Agent {
 
     const seenToolCalls = new Set<string>();
 
-    for (let turnIndex = 0; turnIndex < 8; turnIndex += 1) {
+    for (let turnIndex = 0; turnIndex < 20; turnIndex += 1) {
       this.throwIfStopped();
       const conversation = compactConversation(
         this.options.session.messages,
@@ -370,7 +370,11 @@ export function isAgentInterruptedError(error: unknown): error is AgentInterrupt
 }
 
 function toolCallSignature(toolCall: StreamedAssistantTurn["toolCalls"][number]): string {
-  return `${toolCall.function.name}:${toolCall.function.arguments.trim()}`;
+  try {
+    return `${toolCall.function.name}:${JSON.stringify(JSON.parse(toolCall.function.arguments))}`;
+  } catch {
+    return `${toolCall.function.name}:${toolCall.function.arguments.trim()}`;
+  }
 }
 
 function maybeLocalGreeting(userInput: string): string | null {

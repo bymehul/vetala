@@ -5,6 +5,7 @@ import TextInput from "ink-text-input";
 import { Agent, isAgentInterruptedError } from "../agent.js";
 import { latestUndoableEdit, undoLastEdit } from "../edit-history.js";
 import { ApprovalManager } from "../approvals.js";
+import { CustomSpinner } from "./spinner.js";
 import {
   clearProviderSavedAuth,
   loadConfig,
@@ -1474,7 +1475,7 @@ function UpdateInstallBox({
     <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.accent} paddingX={1} flexDirection="column">
       <Text color={UI_COLORS.accent}>Installing update</Text>
       <Box>
-        <Text color={UI_COLORS.accent}>⋯</Text>
+        <CustomSpinner color={UI_COLORS.accent} />
         <Text> Updating to {update.latestVersion}...</Text>
       </Box>
       <Text color={UI_COLORS.muted}>{update.installCommand}</Text>
@@ -1622,7 +1623,7 @@ function LiveActivitySection({ label }: { label: string }) {
     <Box marginBottom={1} flexDirection="column">
       <Text color={UI_COLORS.muted}>doing</Text>
       <Box>
-        <Text color={UI_COLORS.accent}>⋯</Text>
+        <CustomSpinner color={UI_COLORS.accent} />
         <Text color={UI_COLORS.muted}> {label}</Text>
       </Box>
     </Box>
