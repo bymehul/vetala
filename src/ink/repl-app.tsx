@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, Static } from "ink";
 import SelectInput from "ink-select-input";
-import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { Agent, isAgentInterruptedError } from "../agent.js";
 import { latestUndoableEdit, undoLastEdit } from "../edit-history.js";
@@ -1475,9 +1474,7 @@ function UpdateInstallBox({
     <Box marginTop={1} borderStyle="round" borderColor={UI_COLORS.accent} paddingX={1} flexDirection="column">
       <Text color={UI_COLORS.accent}>Installing update</Text>
       <Box>
-        <Text color={UI_COLORS.accent}>
-          <Spinner type="dots" />
-        </Text>
+        <Text color={UI_COLORS.accent}>⋯</Text>
         <Text> Updating to {update.latestVersion}...</Text>
       </Box>
       <Text color={UI_COLORS.muted}>{update.installCommand}</Text>
@@ -1625,9 +1622,7 @@ function LiveActivitySection({ label }: { label: string }) {
     <Box marginBottom={1} flexDirection="column">
       <Text color={UI_COLORS.muted}>doing</Text>
       <Box>
-        <Text color={UI_COLORS.accent}>
-          <Spinner type="dots" />
-        </Text>
+        <Text color={UI_COLORS.accent}>⋯</Text>
         <Text color={UI_COLORS.muted}> {label}</Text>
       </Box>
     </Box>
