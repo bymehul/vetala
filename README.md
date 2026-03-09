@@ -29,7 +29,6 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ### v0.2.2-dev
 
-- fixed UI scroll locking and flickering by removing auto-refresh polling and rendering historic turns statically
 - improved `write_file` and patching tool output to concisely summarize line changes instead of printing full file contents
 - fixed infinite looping of agents on repeated tool calls by properly clearing loop-prevention caches after mutating actions
 - fixed agent loop-prevention strictness for stringified JSON comparisons
