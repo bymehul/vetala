@@ -232,7 +232,23 @@ export function ReplApp({ initialConfig, initialSession, runtimeProfile, store }
     };
   }, [skills]);
 
+  useEffect(() => {
+    let cancelled = false;
 
+    void checkForAppUpdate()
+      .then((update) => {
+        if (!cancelled && update) {
+          setPendingUpdatePrompt(update);
+        }
+      })
+      .catch(() => {
+        // Silently ignore update check errors
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useInput((inputValue, key) => {
     if (showSlashSuggestions && isTabInput(inputValue, key)) {

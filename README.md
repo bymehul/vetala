@@ -27,6 +27,10 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.2.3-dev
+
+- fixed the startup update notifier by properly triggering the update check on app mount
+
 ### v0.2.2-dev
 
 - improved `write_file` and patching tool output to concisely summarize line changes instead of printing full file contents
