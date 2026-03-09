@@ -27,6 +27,16 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.2.2-dev
+
+- fixed UI scroll locking and flickering by removing auto-refresh polling and rendering historic turns statically
+- improved `write_file` and patching tool output to concisely summarize line changes instead of printing full file contents
+- fixed infinite looping of agents on repeated tool calls by properly clearing loop-prevention caches after mutating actions
+- fixed agent loop-prevention strictness for stringified JSON comparisons
+- fixed "Allow for Session" API keys accidentally dropping when the CLI config was hot-reloaded
+- added a custom braille animated terminal spinner for a smoother visual experience
+- increased the agent tool execution limit from 8 to 20 turns to support more complex reasoning workflows
+
 ### v0.2.1-dev
 
 - switched the startup updater to `update-notifier` while keeping Vetala's own in-app `update now` or `update later` prompt

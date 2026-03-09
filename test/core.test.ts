@@ -309,7 +309,7 @@ test("Update notifier surfaces cached updates and respects snooze", async () => 
     const store = new MemoryUpdateStore();
     const updateInfo = {
       latest: "0.3.0",
-      current: "0.2.1-dev",
+      current: "0.2.2-dev",
       type: "minor",
       name: "@vetala/vetala"
     };
@@ -324,7 +324,7 @@ test("Update notifier surfaces cached updates and respects snooze", async () => 
     };
 
     const update = await checkForAppUpdate({
-      currentVersion: "0.2.1-dev",
+      currentVersion: "0.2.2-dev",
       notifier,
       now: new Date("2026-03-08T00:00:00.000Z")
     });
@@ -339,7 +339,7 @@ test("Update notifier surfaces cached updates and respects snooze", async () => 
     });
 
     const suppressed = await checkForAppUpdate({
-      currentVersion: "0.2.1-dev",
+      currentVersion: "0.2.2-dev",
       notifier,
       now: new Date("2026-03-08T00:05:30.000Z")
     });
@@ -347,7 +347,7 @@ test("Update notifier surfaces cached updates and respects snooze", async () => 
     assert.equal(suppressed, null);
 
     const visibleAgain = await checkForAppUpdate({
-      currentVersion: "0.2.1-dev",
+      currentVersion: "0.2.2-dev",
       notifier: forcedNotifier,
       now: new Date("2026-03-08T00:06:30.000Z"),
       force: true
