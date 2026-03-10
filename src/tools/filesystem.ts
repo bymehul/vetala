@@ -270,7 +270,7 @@ const readSymbolTool: ToolSpec = {
 
 const writeFileTool: ToolSpec = {
   name: "write_file",
-  description: "Write or create a UTF-8 file after approval. Existing files must be read first.",
+  description: "Write or create a UTF-8 file. Existing files MUST be read first. Provide the complete file content. DO NOT USE PLACEHOLDERS like '...rest of code...'.",
   jsonSchema: {
     type: "object",
     properties: {
@@ -280,7 +280,7 @@ const writeFileTool: ToolSpec = {
       },
       content: {
         type: "string",
-        description: "Full file contents to write."
+        description: "Full, complete file contents to write. Do not truncate."
       }
     },
     required: ["path", "content"],
@@ -327,7 +327,7 @@ const writeFileTool: ToolSpec = {
 
 const applyPatchTool: ToolSpec = {
   name: "apply_patch",
-  description: "Apply one or more search-and-replace patch hunks to an existing UTF-8 file after it has been read.",
+  description: "Apply search-and-replace patch hunks to an existing file. The file MUST be read first. Your 'search' text must EXACTLY MATCH the target file, including all whitespace and indentation.",
   jsonSchema: {
     type: "object",
     properties: {
@@ -343,11 +343,11 @@ const applyPatchTool: ToolSpec = {
           properties: {
             search: {
               type: "string",
-              description: "Text to find."
+              description: "EXACT text to find, including leading spaces. Provide enough context lines to ensure uniqueness."
             },
             replace: {
               type: "string",
-              description: "Replacement text."
+              description: "Replacement text to insert."
             },
             all: {
               type: "boolean",
@@ -404,7 +404,7 @@ const applyPatchTool: ToolSpec = {
 
 const replaceInFileTool: ToolSpec = {
   name: "replace_in_file",
-  description: "Replace text inside an existing UTF-8 file after approval. The file must be read first.",
+  description: "Replace text inside an existing file. The file MUST be read first. The 'search' string must EXACTLY match the current file contents, including indentation.",
   jsonSchema: {
     type: "object",
     properties: {
@@ -414,7 +414,7 @@ const replaceInFileTool: ToolSpec = {
       },
       search: {
         type: "string",
-        description: "Text to find."
+        description: "EXACT text to find. Provide enough lines of context to ensure a unique match."
       },
       replace: {
         type: "string",

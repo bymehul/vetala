@@ -67,8 +67,27 @@ program
       return;
     }
 
-    const { startRepl } = await import("./repl.js");
-    await startRepl(session, { ui, store, runtimeProfile });
+    const { spawn } = await import("node:child_process");
+    const { join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+
+    // The TUI binary is built in the tui/ subdirectory relative to the project root
+    // cli.ts is in src/ (or dist/src/), so we traverse up
+    const __dirname = fileURLToPath(new URL(".", import.meta.url));
+    const isDist = __dirname.includes("dist");
+
+    // If in dist/src, project root is ../../
+    // If in src, project root is ../
+    const projectRoot = join(__dirname, isDist ? "../../" : "../");
+    const tuiBin = join(projectRoot, "tui", "vetala");
+
+    const tuiProcess = spawn(tuiBin, ["--workspace", session.workspaceRoot], {
+      stdio: "inherit"
+    });
+
+    tuiProcess.on("close", (code) => {
+      process.exit(code ?? 0);
+    });
   });
 
 await program.parseAsync(process.argv);
@@ -97,10 +116,10 @@ async function runOneShot(
 ): Promise<void> {
   const rl = stdin.isTTY
     ? readline.createInterface({
-        input: stdin,
-        output: stdout,
-        terminal: true
-      })
+      input: stdin,
+      output: stdout,
+      terminal: true
+    })
     : null;
 
   try {

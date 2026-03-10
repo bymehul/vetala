@@ -4,6 +4,7 @@ node_modules/
 # build output
 dist/
 *.tsbuildinfo
+dist-newstyle/
 
 # package artifacts
 *.tgz
@@ -28,3 +29,6 @@ coverage/
 .idea/
 *.swp
 *.swo
+
+# downloaded repos
+ref/

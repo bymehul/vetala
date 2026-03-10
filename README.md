@@ -10,7 +10,7 @@ This is the first build and not a stable v1 release, so some bugs are expected.
 
 Vetala is designed for code-focused terminal work:
 
-- interactive CLI built with Ink
+- interactive CLI built with Go and Bubble Tea
 - multi-turn sessions with persisted state
 - local file, shell, git, and web-capable tool execution
 - approval-aware operations for safer workspace access
@@ -27,35 +27,13 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
-### v0.2.3-dev
+### v0.3.0-dev
 
-- fixed the startup update notifier by properly triggering the update check on app mount
+- **Total UI Re-architecture**: Switched from React Ink to a high-performance Go + Bubble Tea TUI.
+- **Improved Tool Formatting**: Redesigned tool executions to extract and highlight key parameters (e.g., `file_path`, `command`), avoiding large raw JSON blobs.
+- **IPC Backend**: Node.js agent now runs in headless mode, commanded purely via IPC from the Go frontend.
+- **Improved Terminal Emulation**: Switched to `node-pty` for more robust shell tool execution.
 
-### v0.2.2-dev
-
-- improved `write_file` and patching tool output to concisely summarize line changes instead of printing full file contents
-- fixed infinite looping of agents on repeated tool calls by properly clearing loop-prevention caches after mutating actions
-- fixed agent loop-prevention strictness for stringified JSON comparisons
-- fixed "Allow for Session" API keys accidentally dropping when the CLI config was hot-reloaded
-- added a custom braille animated terminal spinner for a smoother visual experience
-- increased the agent tool execution limit from 8 to 20 turns to support more complex reasoning workflows
-
-### v0.2.1-dev
-
-- switched the startup updater to `update-notifier` while keeping Vetala's own in-app `update now` or `update later` prompt
-- added cached foreground update checks plus snooze handling so a fresh npm release can surface cleanly in the TUI
-
-### v0.2.0-dev
-
-- added provider-aware `/model` setup with Sarvam model selection and manual OpenRouter model-id entry
-- added OpenRouter as the second supported provider
-- added HTML web search with DuckDuckGo by default plus Stack Overflow, Brave, and Bing provider options
-- added prompt guidance so Vetala searches instead of guessing when it is unsure about factual or current information
-- added diff previews before file changes and `/undo` for the last tracked edit
-- improved streaming performance and approval handling so long replies are less likely to stall the TUI
-- added runtime environment detection for host OS, shell, terminal type, and viewport so the UI and agent can adapt to the current machine
-- added `sleep` plus longer shell timeouts so the agent can wait for slower builds, tests, or generated output
-- added an interactive next-prompt popup so you can queue a message or stop the current turn and send the next one immediately
 
 ## Compatibility
 

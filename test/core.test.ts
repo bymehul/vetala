@@ -18,8 +18,6 @@ import {
   trustWorkspace,
   withSessionAuth
 } from "../src/config.js";
-import { buildSlashSuggestions } from "../src/ink/command-suggestions.js";
-import { buildTranscriptCards } from "../src/ink/transcript-cards.js";
 import { PathPolicy } from "../src/path-policy.js";
 import {
   detectRuntimeHostProfile,
@@ -376,21 +374,7 @@ test("Conversation compaction keeps recent messages and summarizes older context
   assert.match(compacted.memory ?? "", /Referenced files: \/tmp\/app\.ts, \/tmp\/agent\.ts/);
 });
 
-test("Transcript cards group a user turn into a single card", () => {
-  const cards = buildTranscriptCards([
-    { id: "1", kind: "user", text: "hi" },
-    { id: "2", kind: "activity", text: "Thinking with sarvam-105b." },
-    { id: "3", kind: "assistant", text: "Vetala here." },
-    { id: "4", kind: "user", text: "/help" },
-    { id: "5", kind: "info", text: "/help\n/model" }
-  ]);
 
-  assert.equal(cards.length, 2);
-  assert.equal(cards[0]?.entries.length, 3);
-  assert.equal(cards[1]?.entries.length, 2);
-  assert.equal(cards[0]?.entries[2]?.kind, "assistant");
-  assert.equal(cards[1]?.entries[1]?.kind, "info");
-});
 
 test("SkillRuntime indexes skills and reads nested files", async () => {
   await withIsolatedXdg(async () => {
@@ -454,29 +438,7 @@ test("SkillRuntime indexes skills and reads nested files", async () => {
   });
 });
 
-test("Slash suggestions match top-level commands and skill names", () => {
-  const skills: SkillCatalogEntry[] = [
-    {
-      name: "git-workflow",
-      description: "Git and PR workflow guidance.",
-      rootPath: "/tmp/skill/git-workflow",
-      entryPath: "/tmp/skill/git-workflow/SKILL.md",
-      availableFiles: ["SKILL.md", "references/pull-request-workflow.md"]
-    }
-  ];
 
-  const helpSuggestions = buildSlashSuggestions("/he", skills);
-  assert.equal(helpSuggestions[0]?.completion, "/help");
-
-  const undoSuggestions = buildSlashSuggestions("/un", skills);
-  assert.equal(undoSuggestions[0]?.completion, "/undo");
-
-  const skillSuggestions = buildSlashSuggestions("/skill use g", skills);
-  assert.equal(skillSuggestions[0]?.completion, "/skill use git-workflow");
-
-  const readSuggestions = buildSlashSuggestions("/skill read git-workflow re", skills);
-  assert.equal(readSuggestions[0]?.completion, "/skill read git-workflow references/pull-request-workflow.md");
-});
 
 test("DuckDuckGo HTML parser extracts result titles and decoded URLs", () => {
   const html = [
@@ -676,7 +638,7 @@ function createTestToolContext(root: string, session: SessionState, store: Sessi
     approvals: {
       requestApproval: async () => true,
       hasSessionGrant: () => false,
-      registerReference: async () => {},
+      registerReference: async () => { },
       ensureWebAccess: async () => true
     },
     reads: {
