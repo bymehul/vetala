@@ -27,6 +27,12 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.3.1-dev
+
+- **Improved Search Matching**: Fixed a bug in `search_repo` glob matching to correctly handle nested directory patterns and absolute paths.
+- **Reliable Fallback Search**: Disabled PTY for `ripgrep` to ensure reliable fallback to manual search when the binary is missing.
+- **Update Notifications**: Integrated `update-notifier` for better version awareness.
+
 ### v0.3.0-dev
 
 - **Total UI Re-architecture**: Switched from React Ink to a high-performance Go + Bubble Tea TUI.

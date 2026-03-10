@@ -48,7 +48,10 @@ export async function searchRepo(options: RepoSearchOptions): Promise<RepoSearch
         ...options,
         globs
       }),
-      { cwd: options.cwd }
+      {
+        cwd: options.cwd,
+        noPty: true
+      }
     );
 
     return parseSearchMatches(`${result.stdout}${result.stderr}`, options.limit);
@@ -182,8 +185,12 @@ async function fallbackSearch(options: RepoSearchOptions & { globs: string[] }):
         continue;
       }
 
-      if (entry.isFile() && matchesGlob(entryPath, options.globs)) {
-        await searchFile(options, entryPath, matches);
+      if (entry.isFile()) {
+        const relativePath = path.relative(options.target, entryPath);
+        const isMatch = matchesGlob(relativePath, options.globs);
+        if (isMatch) {
+          await searchFile(options, entryPath, matches);
+        }
       }
     }
   }
@@ -286,8 +293,13 @@ function matchesGlob(filePath: string, globs: string[]): boolean {
   return globs.some((glob) => {
     const escaped = glob
       .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*/g, ".*")
-      .replace(/\*/g, "[^/]*");
+      .replace(/\*\*\//g, "___DSTAR_SLASH___")
+      .replace(/\/\*\*/g, "___SLASH_DSTAR___")
+      .replace(/\*\*/g, "___DSTAR___")
+      .replace(/\*/g, "[^/]*")
+      .replace(/___DSTAR_SLASH___/g, "(.*\/)?")
+      .replace(/___SLASH_DSTAR___/g, "(\/.*)?")
+      .replace(/___DSTAR___/g, ".*");
     return new RegExp(`^${escaped}$`).test(normalized) || new RegExp(`/${escaped}$`).test(normalized);
   });
 }

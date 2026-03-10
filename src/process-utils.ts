@@ -12,6 +12,7 @@ export interface CommandOutput {
 interface BaseOptions {
   cwd: string;
   timeoutMs?: number;
+  noPty?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -43,7 +44,7 @@ export async function runExecFile(
 ): Promise<CommandOutput> {
   await loadPty();
 
-  if (pty && Terminal && !process.env.DISABLE_PTY) {
+  if (pty && Terminal && !process.env.DISABLE_PTY && !options.noPty) {
     return new Promise((resolve, reject) => {
       let timedOut = false;
       

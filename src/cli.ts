@@ -29,6 +29,19 @@ program
   .option("--provider <provider>", "Override the provider for this run")
   .option("--model <model>", "Override the model for this run")
   .action(async (options) => {
+    const { spawn } = await import("node:child_process");
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const { default: updateNotifier } = await import("update-notifier");
+
+    const __dirname = fileURLToPath(new URL(".", import.meta.url));
+    const isDist = __dirname.includes("dist");
+    const projectRoot = join(__dirname, isDist ? "../../" : "../");
+    const pkg = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
+
+    updateNotifier({ pkg }).notify();
+
     let config = await loadConfig();
     const runtimeProfile = detectRuntimeHostProfile();
     const ui = new TerminalUI(runtimeProfile);
@@ -67,18 +80,7 @@ program
       return;
     }
 
-    const { spawn } = await import("node:child_process");
-    const { join } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-
     // The TUI binary is built in the tui/ subdirectory relative to the project root
-    // cli.ts is in src/ (or dist/src/), so we traverse up
-    const __dirname = fileURLToPath(new URL(".", import.meta.url));
-    const isDist = __dirname.includes("dist");
-
-    // If in dist/src, project root is ../../
-    // If in src, project root is ../
-    const projectRoot = join(__dirname, isDist ? "../../" : "../");
     const tuiBin = join(projectRoot, "tui", "vetala");
 
     const tuiProcess = spawn(tuiBin, ["--workspace", session.workspaceRoot], {
