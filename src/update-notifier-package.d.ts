@@ -26,6 +26,12 @@ declare module "update-notifier" {
     update?: UpdateInfo;
     config?: UpdateNotifierConfigStore;
     fetchInfo(): Promise<UpdateInfo>;
+    notify(options?: {
+      message?: string;
+      defer?: boolean;
+      isGlobal?: boolean;
+      boxenOptions?: Record<string, unknown>;
+    }): void;
   }
 
   export default function updateNotifier(options: UpdateNotifierOptions): UpdateNotifierInstance;
