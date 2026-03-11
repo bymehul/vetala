@@ -33,8 +33,8 @@ async function main() {
   console.error(`Smoke tarball: ${tarballPath}`);
   console.error(`Smoke root: ${tempRoot}`);
 
-  runSync(npmCommand(), ["init", "-y"], installDir);
-  runSync(npmCommand(), ["install", tarballPath], installDir);
+  runSync(...npmInvocation(["init", "-y"]), installDir);
+  runSync(...npmInvocation(["install", tarballPath]), installDir);
 
   const cliEntry = path.join(installDir, "node_modules", "@vetala", "vetala", "dist", "src", "cli.js");
   console.error(`Smoke CLI entry: ${cliEntry}`);
@@ -88,18 +88,27 @@ function findTarballs(rootDir) {
   return matches;
 }
 
-function npmCommand() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
+function npmInvocation(args) {
+  if (process.platform === "win32") {
+    return ["cmd.exe", ["/d", "/s", "/c", "npm.cmd", ...args]];
+  }
+
+  return ["npm", args];
 }
 
 function runSync(file, args, cwd) {
+  console.error(`Running: ${file} ${args.join(" ")}`);
   const result = spawnSync(file, args, {
     cwd,
     stdio: "inherit"
   });
 
+  if (result.error) {
+    throw result.error;
+  }
+
   if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+    throw new Error(`Command failed with exit code ${result.status ?? "unknown"}: ${file} ${args.join(" ")}`);
   }
 }
 
