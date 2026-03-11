@@ -27,6 +27,12 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.3.3-dev
+
+- **Installed Backend Launcher Fix**: The bundled Go TUI now resolves the package root correctly and starts the compiled backend from `dist/src/ipc-backend.js` in published installs.
+- **Dev Fallback Retained**: Source checkouts still fall back to `npx tsx src/ipc-backend.ts` when the compiled backend is unavailable.
+- **Release Guardrails**: Added Go-side launcher tests and release-time TUI rebuild coverage so packaged installs keep working.
+
 ### v0.3.2-dev
 
 - **Bundled TUI Packaging Fix**: Published installs now include the `tui/vetala` binary required by the global `vetala` launcher.

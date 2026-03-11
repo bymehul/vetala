@@ -4,9 +4,16 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+type backendCommand struct {
+	Dir  string
+	File string
+	Args []string
+}
 
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "--workspace" {
@@ -15,13 +22,20 @@ func main() {
 	}
 	workspace := os.Args[2]
 
-	// Start TS Backend
-	// Using npx tsx src/ipc-backend.ts --workspace <dir>
-	// We run from the root, not tui/
-	cmd := exec.Command("npx", "tsx", "src/ipc-backend.ts", "--workspace", workspace)
+	executablePath, err := os.Executable()
+	if err != nil {
+		fmt.Println("Error locating TUI executable:", err)
+		os.Exit(1)
+	}
 
-	// Set CWD to parent dir (project root)
-	cmd.Dir = "../"
+	backend, err := resolveBackendCommand(executablePath, workspace)
+	if err != nil {
+		fmt.Println("Error resolving backend:", err)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command(backend.File, backend.Args...)
+	cmd.Dir = backend.Dir
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -60,4 +74,49 @@ func main() {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
 	}
+}
+
+func resolveBackendCommand(executablePath string, workspace string) (backendCommand, error) {
+	packageRoot := resolvePackageRoot(executablePath)
+	distBackend := filepath.Join(packageRoot, "dist", "src", "ipc-backend.js")
+
+	if fileExists(distBackend) {
+		return backendCommand{
+			Dir:  packageRoot,
+			File: "node",
+			Args: []string{distBackend, "--workspace", workspace},
+		}, nil
+	}
+
+	sourceBackend := filepath.Join(packageRoot, "src", "ipc-backend.ts")
+	if fileExists(sourceBackend) {
+		return backendCommand{
+			Dir:  packageRoot,
+			File: "npx",
+			Args: []string{"tsx", sourceBackend, "--workspace", workspace},
+		}, nil
+	}
+
+	return backendCommand{}, fmt.Errorf(
+		"could not find Vetala backend. looked for %s and %s",
+		distBackend,
+		sourceBackend,
+	)
+}
+
+func resolvePackageRoot(executablePath string) string {
+	if resolvedPath, err := filepath.EvalSymlinks(executablePath); err == nil {
+		executablePath = resolvedPath
+	}
+
+	return filepath.Dir(filepath.Dir(executablePath))
+}
+
+func fileExists(target string) bool {
+	info, err := os.Stat(target)
+	if err != nil {
+		return false
+	}
+
+	return !info.IsDir()
 }

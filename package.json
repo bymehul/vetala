@@ -1,6 +1,6 @@
 {
   "name": "@vetala/vetala",
-  "version": "0.3.2-dev",
+  "version": "0.3.3-dev",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Terminal-first AI coding CLI with tools, memory, and local skills.",
@@ -43,10 +43,13 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:tui": "cd tui && go build -o vetala .",
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx src/cli.ts",
+    "prepack": "npm run build:tui",
     "prepare": "npm run build",
-    "test": "node --test --import tsx test/**/*.ts"
+    "test": "node --test --import tsx test/**/*.ts && npm run test:tui",
+    "test:tui": "cd tui && go test ."
   },
   "dependencies": {
     "@lydell/node-pty": "^1.2.0-beta.3",

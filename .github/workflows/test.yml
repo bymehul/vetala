@@ -18,6 +18,11 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+
       - name: Install dependencies
         run: npm ci
 
@@ -29,3 +34,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Verify package tarball
+        run: npm pack --dry-run
