@@ -5,39 +5,51 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-const input = process.argv[2];
-if (!input) {
-  console.error("Usage: node scripts/smoke-installed-cli.mjs <tarball-or-directory>");
+try {
+  await main();
+} catch (error) {
+  console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   process.exit(1);
 }
 
-const tarballPath = resolveTarball(path.resolve(input));
-const tempRoot = mkdtempSync(path.join(tmpdir(), "vetala-smoke-"));
-const installDir = path.join(tempRoot, "install");
-const workspaceDir = path.join(tempRoot, "workspace");
-const configDir = path.join(tempRoot, "config");
-const dataDir = path.join(tempRoot, "data");
+async function main() {
+  const input = process.argv[2];
+  if (!input) {
+    throw new Error("Usage: node scripts/smoke-installed-cli.mjs <tarball-or-directory>");
+  }
 
-mkdirSync(installDir, { recursive: true });
-mkdirSync(workspaceDir, { recursive: true });
-mkdirSync(configDir, { recursive: true });
-mkdirSync(dataDir, { recursive: true });
+  const tarballPath = resolveTarball(path.resolve(input));
+  const tempRoot = mkdtempSync(path.join(tmpdir(), "vetala-smoke-"));
+  const installDir = path.join(tempRoot, "install");
+  const workspaceDir = path.join(tempRoot, "workspace");
+  const configDir = path.join(tempRoot, "config");
+  const dataDir = path.join(tempRoot, "data");
 
-runSync(npmCommand(), ["init", "-y"], installDir);
-runSync(npmCommand(), ["install", tarballPath], installDir);
+  mkdirSync(installDir, { recursive: true });
+  mkdirSync(workspaceDir, { recursive: true });
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
 
-const cliEntry = path.join(installDir, "node_modules", "@vetala", "vetala", "dist", "src", "cli.js");
+  console.error(`Smoke tarball: ${tarballPath}`);
+  console.error(`Smoke root: ${tempRoot}`);
 
-await runSmoke(cliEntry, workspaceDir, {
-  ...process.env,
-  APPDATA: configDir,
-  LOCALAPPDATA: dataDir,
-  NO_COLOR: "1",
-  NO_UPDATE_NOTIFIER: "1",
-  VETALA_SMOKE_TEST: "1",
-  XDG_CONFIG_HOME: configDir,
-  XDG_DATA_HOME: dataDir
-});
+  runSync(npmCommand(), ["init", "-y"], installDir);
+  runSync(npmCommand(), ["install", tarballPath], installDir);
+
+  const cliEntry = path.join(installDir, "node_modules", "@vetala", "vetala", "dist", "src", "cli.js");
+  console.error(`Smoke CLI entry: ${cliEntry}`);
+
+  await runSmoke(cliEntry, workspaceDir, {
+    ...process.env,
+    APPDATA: configDir,
+    LOCALAPPDATA: dataDir,
+    NO_COLOR: "1",
+    NO_UPDATE_NOTIFIER: "1",
+    VETALA_SMOKE_TEST: "1",
+    XDG_CONFIG_HOME: configDir,
+    XDG_DATA_HOME: dataDir
+  });
+}
 
 function resolveTarball(targetPath) {
   if (statSync(targetPath).isFile()) {
@@ -48,16 +60,32 @@ function resolveTarball(targetPath) {
     throw new Error(`Unsupported path: ${targetPath}`);
   }
 
-  const matches = readdirSync(targetPath)
-    .filter((entry) => entry.endsWith(".tgz"))
-    .map((entry) => path.join(targetPath, entry))
-    .sort();
+  const matches = findTarballs(targetPath).sort();
 
   if (matches.length !== 1) {
     throw new Error(`Expected exactly one .tgz file in ${targetPath}, found ${matches.length}`);
   }
 
   return matches[0];
+}
+
+function findTarballs(rootDir) {
+  const matches = [];
+  const entries = readdirSync(rootDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      matches.push(...findTarballs(fullPath));
+      continue;
+    }
+
+    if (entry.isFile() && entry.name.endsWith(".tgz")) {
+      matches.push(fullPath);
+    }
+  }
+
+  return matches;
 }
 
 function npmCommand() {

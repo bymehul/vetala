@@ -68,5 +68,8 @@ jobs:
           name: npm-package
           path: artifacts
 
+      - name: List downloaded artifact files
+        run: node -e "const fs=require('node:fs'); const path=require('node:path'); function walk(dir){ for(const entry of fs.readdirSync(dir,{withFileTypes:true})){ const target=path.join(dir,entry.name); if(entry.isDirectory()) walk(target); else console.log(target);} } walk('artifacts');"
+
       - name: Smoke test installed package
         run: node scripts/smoke-installed-cli.mjs artifacts
