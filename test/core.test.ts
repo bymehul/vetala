@@ -40,6 +40,12 @@ import {
   type AppUpdateStore
 } from "../src/update-notifier.js";
 import { APP_VERSION } from "../src/app-meta.js";
+import {
+  BUNDLED_TUI_FILES as EXPECTED_TUI_FILES,
+  formatSupportedTuiTargets as describeTuiTargets,
+  resolveBundledTuiBinaryCandidates as resolveTuiCandidates,
+  resolveBundledTuiFileName as resolveTuiFileName
+} from "../src/tui-binary.js";
 import type { PersistedMessage, SessionState, ToolCall, ToolContext } from "../src/types.js";
 
 test("SessionStore persists and reloads JSONL sessions", async () => {
@@ -176,7 +182,43 @@ test("Package metadata stays in sync with the bundled TUI launcher", async () =>
   };
 
   assert.equal(packageJson.version, APP_VERSION);
-  assert.ok(packageJson.files?.includes("tui/vetala"));
+  assert.deepEqual(
+    EXPECTED_TUI_FILES.filter((filePath) => !packageJson.files?.includes(filePath)),
+    []
+  );
+});
+
+test("Bundled TUI file names resolve for supported targets", () => {
+  assert.equal(resolveTuiFileName("linux", "x64"), "vetala-linux-x64");
+  assert.equal(resolveTuiFileName("linux", "arm64"), "vetala-linux-arm64");
+  assert.equal(resolveTuiFileName("darwin", "x64"), "vetala-darwin-x64");
+  assert.equal(resolveTuiFileName("darwin", "arm64"), "vetala-darwin-arm64");
+  assert.equal(resolveTuiFileName("win32", "x64"), "vetala-win32-x64.exe");
+  assert.equal(resolveTuiFileName("win32", "arm64"), "vetala-win32-arm64.exe");
+  assert.equal(resolveTuiFileName("linux", "arm"), null);
+  assert.match(describeTuiTargets(), /linux\/x64/);
+  assert.match(describeTuiTargets(), /win32\/arm64/);
+});
+
+test("Bundled TUI candidate resolution keeps local dev fallbacks", () => {
+  const linuxCandidates = resolveTuiCandidates("/tmp/vetala", "linux", "x64");
+  assert.equal(linuxCandidates.preferredRelativePath, "tui/vetala-linux-x64");
+  assert.deepEqual(linuxCandidates.candidates, [
+    path.join("/tmp/vetala", "tui", "vetala-linux-x64"),
+    path.join("/tmp/vetala", "tui", "vetala")
+  ]);
+
+  const windowsCandidates = resolveTuiCandidates("/tmp/vetala", "win32", "arm64");
+  assert.equal(windowsCandidates.preferredRelativePath, "tui/vetala-win32-arm64.exe");
+  assert.deepEqual(windowsCandidates.candidates, [
+    path.join("/tmp/vetala", "tui", "vetala-win32-arm64.exe"),
+    path.join("/tmp/vetala", "tui", "vetala.exe"),
+    path.join("/tmp/vetala", "tui", "vetala")
+  ]);
+
+  const unsupportedCandidates = resolveTuiCandidates("/tmp/vetala", "freebsd", "x64");
+  assert.equal(unsupportedCandidates.supported, false);
+  assert.equal(unsupportedCandidates.preferredRelativePath, null);
 });
 
 test("SessionStore persists pinned skills across reload", async () => {

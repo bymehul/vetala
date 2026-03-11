@@ -29,9 +29,10 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ### v0.3.3-dev
 
+- **Cross-Platform TUI Packaging**: npm packages now bundle prebuilt TUI binaries for `linux`, `darwin`, and `win32` on `x64` and `arm64`, with the CLI selecting the matching binary at runtime.
 - **Installed Backend Launcher Fix**: The bundled Go TUI now resolves the package root correctly and starts the compiled backend from `dist/src/ipc-backend.js` in published installs.
 - **Dev Fallback Retained**: Source checkouts still fall back to `npx tsx src/ipc-backend.ts` when the compiled backend is unavailable.
-- **Release Guardrails**: Added Go-side launcher tests and release-time TUI rebuild coverage so packaged installs keep working.
+- **Release Guardrails**: Added Go-side launcher tests and release-time cross-build coverage so packaged installs keep working.
 
 ### v0.3.2-dev
 
@@ -57,7 +58,7 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 Vetala is currently tested on Linux.
 
-Windows and macOS have not been validated yet.
+Published npm installs bundle prebuilt TUI binaries for Linux, macOS, and Windows on `x64` and `arm64`, but macOS and Windows should still be treated as early-support targets until they receive broader validation.
 
 ## Installation
 
@@ -68,13 +69,18 @@ npm install -g @vetala/vetala
 vetala
 ```
 
+The published npm package bundles the TUI binary for supported targets, so end users do not need Go for a normal install.
+
 ### Local development install
 
 ```bash
 npm install
+npm run build:tui
 npm link
 vetala
 ```
+
+`npm run build:tui` is only needed for source checkouts and requires Go.
 
 The package is published as `@vetala/vetala` and exposes a global `vetala` binary through `package.json`.
 

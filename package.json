@@ -30,7 +30,12 @@
   },
   "files": [
     "dist/src",
-    "tui/vetala",
+    "tui/vetala-linux-x64",
+    "tui/vetala-linux-arm64",
+    "tui/vetala-darwin-x64",
+    "tui/vetala-darwin-arm64",
+    "tui/vetala-win32-x64.exe",
+    "tui/vetala-win32-arm64.exe",
     "skill",
     "README.md",
     "CONTRIBUTING.md",
@@ -43,10 +48,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "build:tui": "cd tui && go build -o vetala .",
+    "build:tui": "node scripts/build-tui.mjs",
+    "build:tui:all": "node scripts/build-tui.mjs --all",
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx src/cli.ts",
-    "prepack": "npm run build:tui",
+    "prepack": "npm run build:tui:all",
     "prepare": "npm run build",
     "test": "node --test --import tsx test/**/*.ts && npm run test:tui",
     "test:tui": "cd tui && go test ."

@@ -14,6 +14,7 @@ import { SessionStore } from "./session-store.js";
 import { SkillRuntime } from "./skills/runtime.js";
 import { TerminalUI } from "./terminal-ui.js";
 import { createToolRegistry } from "./tools/index.js";
+import { formatSupportedTuiTargets, resolveBundledTuiBinaryCandidates } from "./tui-binary.js";
 import type { ProviderName, SessionState } from "./types.js";
 import { ensureWorkspaceTrust } from "./workspace-trust.js";
 
@@ -81,15 +82,22 @@ program
       return;
     }
 
-    // The TUI binary is built in the tui/ subdirectory relative to the project root
-    const tuiBin = join(projectRoot, "tui", "vetala");
-    const missingTuiMessage =
-      `Vetala could not find its bundled TUI binary at ${tuiBin}.\n` +
-      "This install is incomplete. Reinstall a package that includes `tui/vetala`, or run `npm run dev` from a repo checkout.";
+    const requiredAccess = process.platform === "win32" ? constants.F_OK : constants.X_OK;
+    const tuiResolution = resolveBundledTuiBinaryCandidates(projectRoot);
+    const missingTuiMessage = buildMissingTuiMessage(tuiResolution);
+    let tuiBin: string | null = null;
 
-    try {
-      await access(tuiBin, constants.X_OK);
-    } catch {
+    for (const candidate of tuiResolution.candidates) {
+      try {
+        await access(candidate, requiredAccess);
+        tuiBin = candidate;
+        break;
+      } catch {
+        // Try the next packaged or local-dev fallback candidate.
+      }
+    }
+
+    if (!tuiBin) {
       throw new Error(missingTuiMessage);
     }
 
@@ -173,4 +181,26 @@ async function runOneShot(
 
 function resolveProviderOption(value: string | undefined): ProviderName | undefined {
   return resolveProviderName(value);
+}
+
+function buildMissingTuiMessage(resolution: ReturnType<typeof resolveBundledTuiBinaryCandidates>): string {
+  const checked = resolution.candidates.map((candidate) => `- ${candidate}`).join("\n");
+
+  if (!resolution.supported) {
+    return [
+      `Vetala does not currently bundle a TUI binary for ${process.platform}/${process.arch}.`,
+      `Supported targets: ${formatSupportedTuiTargets()}.`,
+      "Checked these local fallback paths:",
+      checked,
+      "Reinstall a supported package build, run `npm run dev`, or build the TUI manually from a repo checkout."
+    ].join("\n");
+  }
+
+  return [
+    `Vetala could not find its bundled TUI binary for ${process.platform}/${process.arch}.`,
+    `Expected package file: ${resolution.preferredRelativePath}.`,
+    "Checked these paths:",
+    checked,
+    "This install is incomplete. Reinstall a package that includes the platform-specific TUI binary, or run `npm run dev` from a repo checkout."
+  ].join("\n");
 }
