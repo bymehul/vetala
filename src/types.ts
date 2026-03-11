@@ -259,6 +259,9 @@ export interface ToolContext {
     registerReference(path: string): Promise<void>;
     ensureWebAccess(): Promise<boolean>;
   };
+  interaction: {
+    askUser(prompt: string): Promise<string>;
+  };
   reads: {
     hasRead(path: string): boolean;
     registerRead(path: string): Promise<void>;

@@ -28,6 +28,7 @@ export interface AgentOptions {
   skills: SkillRuntime;
   tools: ToolRegistry;
   ui: TerminalUI;
+  requestTextInput: (title: string, placeholder: string) => Promise<string>;
 }
 
 export class Agent {
@@ -250,6 +251,9 @@ export class Agent {
         hasSessionGrant: (key) => this.options.approvals.hasSessionGrant(key),
         registerReference: (targetPath) => this.options.approvals.registerReference(targetPath),
         ensureWebAccess: () => this.options.approvals.ensureWebAccess()
+      },
+      interaction: {
+        askUser: (prompt) => this.options.requestTextInput("Vetala asks", prompt)
       },
       reads: {
         hasRead: (targetPath) => this.options.session.readFiles.includes(targetPath),

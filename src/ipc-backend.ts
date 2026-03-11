@@ -142,7 +142,8 @@ async function main(): Promise<void> {
             runtimeProfile,
             skills,
             tools: createTools(),
-            ui
+            ui,
+            requestTextInput
         });
         activeAgent = agent;
 
@@ -151,6 +152,10 @@ async function main(): Promise<void> {
             ui.sendStatus(queuedNextPrompt ? "Running queued prompt" : "Ready");
         } catch (error) {
             if (isAgentInterruptedError(error)) {
+                const refinement = await requestTextInput("Agent paused. What should I do differently?", "");
+                if (refinement.trim()) {
+                    queuedNextPrompt = refinement;
+                }
                 ui.sendStatus(queuedNextPrompt ? "Running queued prompt" : "Interrupted");
             } else {
                 ui.error(error instanceof Error ? error.message : String(error));

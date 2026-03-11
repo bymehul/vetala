@@ -27,24 +27,13 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
-### v0.3.3-dev
+### v0.4.0-dev
 
-- **Cross-Platform TUI Packaging**: npm packages now bundle prebuilt TUI binaries for `linux`, `darwin`, and `win32` on `x64` and `arm64`, with the CLI selecting the matching binary at runtime.
-- **Installed Backend Launcher Fix**: The bundled Go TUI now resolves the package root correctly and starts the compiled backend from `dist/src/ipc-backend.js` in published installs.
-- **Dev Fallback Retained**: Source checkouts still fall back to `npx tsx src/ipc-backend.ts` when the compiled backend is unavailable.
-- **Release Guardrails**: Added Go-side launcher tests, release-time cross-build coverage, and installed-package smoke checks so packaged installs keep working.
-
-### v0.3.2-dev
-
-- **Bundled TUI Packaging Fix**: Published installs now include the `tui/vetala` binary required by the global `vetala` launcher.
-- **Clearer Startup Failure**: The CLI now reports an explicit install error when the bundled TUI binary is missing instead of crashing with an unhandled `ENOENT`.
-- **Packaging Regression Coverage**: Added a regression test to keep the packaged file list and app version metadata in sync.
-
-### v0.3.1-dev
-
-- **Improved Search Matching**: Fixed a bug in `search_repo` glob matching to correctly handle nested directory patterns and absolute paths.
-- **Reliable Fallback Search**: Disabled PTY for `ripgrep` to ensure reliable fallback to manual search when the binary is missing.
-- **Update Notifications**: Integrated `update-notifier` for better version awareness.
+- **Advanced Cross-Platform Tools**: Added 6 new semantic and interactive tools (`ask_user`, `analyze_image`, `read_docs`, `get_diagnostics`, `list_exports`, `find_references`, `ast_replace`, `semantic_search`).
+- **Interactive Model Refinement**: `Ctrl+C` while the agent is running no longer crashes the CLI. It gracefully pauses the agent, sends an interrupt to the backend, and opens a prompt asking how you would like to refine the agent's course.
+- **Enhanced File System Tooling**: Added `append_to_file`, `move_file`, and `delete_file` tools to give models finer-grained local workspace control and bypass JSON limits for large file rewrites.
+- **Markdown TUI Rendering**: Agent messages are now beautifully rendered in the TUI using `glamour`.
+- **Note on Vision Tools**: The `analyze_image` tool gracefully warns text-only models to avoid hallucination, but true vision testing is ongoing.
 
 ### v0.3.0-dev
 

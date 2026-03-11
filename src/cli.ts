@@ -170,7 +170,12 @@ async function runOneShot(
         includeWebSearch: config.searchProviderName !== "disabled",
         skillRuntime: skills
       }),
-      ui
+      ui,
+      requestTextInput: async (title, placeholder) => {
+        if (!rl) return placeholder;
+        const answer = await rl.question(`${title}${placeholder ? ` (${placeholder})` : ''}: `);
+        return answer || placeholder;
+      }
     });
 
     await agent.runTurn(prompt, stdout.isTTY);

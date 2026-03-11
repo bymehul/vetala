@@ -108,15 +108,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle global keys first
 		switch msg.Type {
 		case tea.KeyCtrlC:
-			// If not in a modal and running, pause. Else exit.
-			if m.modalState == ModalNone && m.running {
-				m.modalState = ModalPause
-				return m, nil
-			} else if m.modalState == ModalPause {
-				m.modalState = ModalNone
-				return m, nil
+			// If running, send interrupt to pause the agent and trigger refinement prompt.
+			// Otherwise, clear the current input to avoid accidental exits. Use Ctrl+D to exit.
+			if m.running {
+				sendInterrupt(m.backendWriter)
+			} else {
+				m.textInput.SetValue("")
 			}
-			return m, tea.Quit
+			return m, nil
 		case tea.KeyCtrlD:
 			m.modalState = ModalExit
 			return m, nil

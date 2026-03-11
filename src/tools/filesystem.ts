@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { buildDiffPreview, lcsDiff } from "../edits/diff.js";
 import type { ToolContext, ToolResult, ToolSpec } from "../types.js";
 import { searchRepo, searchRepoSymbol } from "./repo-search.js";
@@ -24,8 +24,11 @@ export function createFilesystemTools(): ToolSpec[] {
     readFileChunkTool,
     readSymbolTool,
     writeFileTool,
+    appendToFileTool,
     applyPatchTool,
-    replaceInFileTool
+    replaceInFileTool,
+    moveFileTool,
+    deleteFileTool
   ];
 }
 
@@ -325,6 +328,65 @@ const writeFileTool: ToolSpec = {
   }
 };
 
+const appendToFileTool: ToolSpec = {
+  name: "append_to_file",
+  description: "Append content to the end of a UTF-8 file. Useful for adding new code without rewriting the whole file.",
+  jsonSchema: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Path to the file to append to."
+      },
+      content: {
+        type: "string",
+        description: "Content to append to the file."
+      }
+    },
+    required: ["path", "content"],
+    additionalProperties: false
+  },
+  readOnly: false,
+  async execute(rawArgs, context) {
+    const args = expectObject(rawArgs);
+    const target = await context.paths.ensureWritable(requiredString(args.path, "path"));
+    const guard = await denyUnreadEdit(target, context, "append to");
+
+    if (guard) {
+      return guard;
+    }
+
+    const newContent = requiredString(args.content, "content");
+    const previousContent = await readExistingText(target) || "";
+    const nextContent = previousContent + newContent;
+
+    const approved = await context.approvals.requestApproval({
+      kind: "write_file",
+      key: `edit_file:${target}`,
+      label: [
+        "Allow appending to file?",
+        `path: ${target}`,
+        "",
+        buildDiffPreview(target, previousContent, nextContent)
+      ].join("\n")
+    });
+
+    if (!approved) {
+      return denied(`Append denied for ${target}`);
+    }
+
+    await mkdir(path.dirname(target), { recursive: true });
+    await appendFile(target, newContent, "utf8");
+    await context.edits.recordEdit({
+      path: target,
+      beforeContent: previousContent,
+      afterContent: nextContent,
+      summary: "append_to_file"
+    });
+    return successWithDiff(target, previousContent, nextContent, `Appended to ${target}`);
+  }
+};
+
 const applyPatchTool: ToolSpec = {
   name: "apply_patch",
   description: "Apply search-and-replace patch hunks to an existing file. The file MUST be read first. Your 'search' text must EXACTLY MATCH the target file, including all whitespace and indentation.",
@@ -469,6 +531,106 @@ const replaceInFileTool: ToolSpec = {
     }
 
     return writePatchedFile(target, original, applied.updated, `Edited ${target}`, context, 1, applied.replacements);
+  }
+};
+
+const moveFileTool: ToolSpec = {
+  name: "move_file",
+  description: "Move or rename a file or directory.",
+  jsonSchema: {
+    type: "object",
+    properties: {
+      source: {
+        type: "string",
+        description: "Path to the file or directory to move."
+      },
+      destination: {
+        type: "string",
+        description: "Destination path."
+      }
+    },
+    required: ["source", "destination"],
+    additionalProperties: false
+  },
+  readOnly: false,
+  async execute(rawArgs, context) {
+    const args = expectObject(rawArgs);
+    const source = await context.paths.ensureReadable(requiredString(args.source, "source"));
+    const destination = await context.paths.ensureWritable(requiredString(args.destination, "destination"));
+
+    const approved = await context.approvals.requestApproval({
+      kind: "run_shell",
+      key: `move_file:${source}:${destination}`,
+      label: `Allow moving file?\nFrom: ${source}\nTo: ${destination}`
+    });
+
+    if (!approved) {
+      return denied(`Move denied for ${source} to ${destination}`);
+    }
+
+    try {
+      await mkdir(path.dirname(destination), { recursive: true });
+      await rename(source, destination);
+      return {
+        summary: `Moved ${source} to ${destination}`,
+        content: `Successfully moved ${source} to ${destination}`,
+        isError: false,
+        referencedFiles: [source, destination]
+      };
+    } catch (error) {
+      return {
+        summary: `Failed to move ${source}`,
+        content: error instanceof Error ? error.message : String(error),
+        isError: true
+      };
+    }
+  }
+};
+
+const deleteFileTool: ToolSpec = {
+  name: "delete_file",
+  description: "Delete a file.",
+  jsonSchema: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Path to the file to delete."
+      }
+    },
+    required: ["path"],
+    additionalProperties: false
+  },
+  readOnly: false,
+  async execute(rawArgs, context) {
+    const args = expectObject(rawArgs);
+    const target = await context.paths.ensureWritable(requiredString(args.path, "path"));
+
+    const approved = await context.approvals.requestApproval({
+      kind: "run_shell",
+      key: `delete_file:${target}`,
+      label: `Allow deleting file?\nPath: ${target}`
+    });
+
+    if (!approved) {
+      return denied(`Delete denied for ${target}`);
+    }
+
+    try {
+      await unlink(target);
+      return {
+        summary: `Deleted ${target}`,
+        content: `Successfully deleted ${target}`,
+        isError: false,
+        referencedFiles: [target]
+      };
+    } catch (error) {
+      return {
+        summary: `Failed to delete ${target}`,
+        content: error instanceof Error ? error.message : String(error),
+        isError: true
+      };
+    }
   }
 };
 

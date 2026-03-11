@@ -42,9 +42,13 @@ export class ToolRegistry {
     try {
       rawArgs = parseToolArguments(toolCall.function.arguments);
     } catch (error) {
+      let content = error instanceof Error ? error.message : String(error);
+      if (error instanceof SyntaxError) {
+        content += "\n\nHINT: The tool arguments JSON is malformed. If you were writing a large amount of code, you may have hit your maximum output token limit. Please use smaller chunks or the append_to_file tool if writing a large file part by part.";
+      }
       return {
         summary: `Invalid arguments for ${toolCall.function.name}`,
-        content: error instanceof Error ? error.message : String(error),
+        content,
         isError: true
       };
     }

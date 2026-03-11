@@ -6,6 +6,10 @@ import { createShellTools } from "./shell.js";
 import { createSkillTools } from "./skill.js";
 import { createTimingTools } from "./timing.js";
 import { createWebToolsForConfig } from "./web.js";
+import { createInteractionTools } from "./interaction.js";
+import { createVisionTools } from "./vision.js";
+import { createLspTools } from "./lsp.js";
+import { createAdvancedTools } from "./advanced.js";
 
 export function createToolRegistry(options: {
   includeWebSearch?: boolean;
@@ -19,6 +23,10 @@ export function createToolRegistry(options: {
     ...createShellTools(),
     ...createTimingTools(),
     ...createGitTools(),
+    ...createInteractionTools(),
+    ...createVisionTools(),
+    ...createLspTools(),
+    ...createAdvancedTools(),
     ...(options.skillRuntime ? createSkillTools(options.skillRuntime) : []),
     ...createWebToolsForConfig(includeWebSearch)
   ]) {

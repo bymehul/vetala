@@ -696,6 +696,9 @@ function createTestToolContext(root: string, session: SessionState, store: Sessi
       registerReference: async () => { },
       ensureWebAccess: async () => true
     },
+    interaction: {
+      askUser: async (prompt) => "test response"
+    },
     reads: {
       hasRead: (targetPath) => session.readFiles.includes(targetPath),
       registerRead: async (targetPath) => store.appendReadFile(session, targetPath)

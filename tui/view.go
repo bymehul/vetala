@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/glamour"
 )
 
 // Styles
@@ -242,6 +243,26 @@ func (m model) renderCardsToPrint(entries []EntryData) string {
 			if entry.Kind == "user" {
 				// User messages rendered bold
 				block := bold.Render(label) + "\n" + wrapText(text, m.width-6)
+				cardContent = append(cardContent, block)
+				continue
+			}
+
+			if entry.Kind == "assistant" {
+				glamourStyle := "dark"
+				if !lipgloss.HasDarkBackground() {
+					glamourStyle = "light"
+				}
+				r, _ := glamour.NewTermRenderer(
+					glamour.WithStandardStyle(glamourStyle),
+					glamour.WithWordWrap(m.width-6),
+				)
+				out, err := r.Render(text)
+				if err == nil && out != "" {
+					text = strings.TrimSpace(out)
+				} else {
+					text = wrapText(text, m.width-6)
+				}
+				block := style.Render(label) + "\n" + text
 				cardContent = append(cardContent, block)
 				continue
 			}
