@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -68,6 +69,23 @@ func TestResolveBackendCommandFailsWhenBackendMissing(t *testing.T) {
 	_, err := resolveBackendCommand(executablePath, "/tmp/workspace")
 	if err == nil {
 		t.Fatal("expected resolveBackendCommand to fail when no backend exists")
+	}
+}
+
+func TestWaitForBackendReadyAcceptsReadyMessage(t *testing.T) {
+	input := bytes.NewBufferString("{\"tag\":\"status\",\"data\":{\"text\":\"Connecting\"}}\n{\"tag\":\"ready\",\"data\":{}}\n")
+
+	if err := waitForBackendReady(input); err != nil {
+		t.Fatalf("expected ready message to pass, got %v", err)
+	}
+}
+
+func TestWaitForBackendReadyFailsWithoutReadyMessage(t *testing.T) {
+	input := bytes.NewBufferString("{\"tag\":\"status\",\"data\":{\"text\":\"Connecting\"}}\n")
+
+	err := waitForBackendReady(input)
+	if err == nil {
+		t.Fatal("expected waitForBackendReady to fail without a ready message")
 	}
 }
 

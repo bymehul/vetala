@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -54,6 +59,15 @@ func main() {
 	if err := cmd.Start(); err != nil {
 		fmt.Println("Error starting backend:", err)
 		os.Exit(1)
+	}
+
+	if os.Getenv("VETALA_SMOKE_TEST") == "1" {
+		if err := runSmokeTest(stdout, stdin, cmd); err != nil {
+			fmt.Println("Smoke test failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println("Vetala smoke test passed.")
+		return
 	}
 
 	m := initialModel(stdin)
@@ -119,4 +133,68 @@ func fileExists(target string) bool {
 	}
 
 	return !info.IsDir()
+}
+
+func runSmokeTest(stdout io.Reader, stdin io.WriteCloser, cmd *exec.Cmd) error {
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- waitForBackendReady(stdout)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			terminateProcess(cmd)
+			return err
+		}
+	case <-time.After(15 * time.Second):
+		terminateProcess(cmd)
+		return errors.New("timed out waiting for backend ready message")
+	}
+
+	sendToBackend(stdin, ClientMsg{Tag: "exit", Data: struct{}{}})
+	_ = stdin.Close()
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-waitCh:
+		return err
+	case <-time.After(5 * time.Second):
+		terminateProcess(cmd)
+		return errors.New("timed out waiting for backend exit after smoke test")
+	}
+}
+
+func waitForBackendReady(stdout io.Reader) error {
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		var msg ServerMsg
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			continue
+		}
+
+		if msg.Tag == "ready" {
+			return nil
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("reading backend output: %w", err)
+	}
+
+	return errors.New("backend exited before sending ready")
+}
+
+func terminateProcess(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
 }

@@ -35,5 +35,38 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Verify package tarball
-        run: npm pack --dry-run
+      - name: Pack package tarball
+        run: npm pack
+
+      - name: Upload package tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: "*.tgz"
+          if-no-files-found: error
+
+  smoke-package:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Download package tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: artifacts
+
+      - name: Smoke test installed package
+        run: node scripts/smoke-installed-cli.mjs artifacts

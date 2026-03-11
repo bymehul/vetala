@@ -32,7 +32,7 @@ Current provider support includes Sarvam AI and OpenRouter.
 - **Cross-Platform TUI Packaging**: npm packages now bundle prebuilt TUI binaries for `linux`, `darwin`, and `win32` on `x64` and `arm64`, with the CLI selecting the matching binary at runtime.
 - **Installed Backend Launcher Fix**: The bundled Go TUI now resolves the package root correctly and starts the compiled backend from `dist/src/ipc-backend.js` in published installs.
 - **Dev Fallback Retained**: Source checkouts still fall back to `npx tsx src/ipc-backend.ts` when the compiled backend is unavailable.
-- **Release Guardrails**: Added Go-side launcher tests and release-time cross-build coverage so packaged installs keep working.
+- **Release Guardrails**: Added Go-side launcher tests, release-time cross-build coverage, and installed-package smoke checks so packaged installs keep working.
 
 ### v0.3.2-dev
 
