@@ -39,6 +39,7 @@ import {
   type AppUpdateNotifier,
   type AppUpdateStore
 } from "../src/update-notifier.js";
+import { APP_VERSION } from "../src/app-meta.js";
 import type { PersistedMessage, SessionState, ToolCall, ToolContext } from "../src/types.js";
 
 test("SessionStore persists and reloads JSONL sessions", async () => {
@@ -164,6 +165,18 @@ test("Config can persist a raw API key for future sessions", async () => {
     config = await loadConfig();
     assert.equal(config.authSource, "missing");
   });
+});
+
+test("Package metadata stays in sync with the bundled TUI launcher", async () => {
+  const packageJson = JSON.parse(
+    await readFsFile(new URL("../package.json", import.meta.url), "utf8")
+  ) as {
+    version: string;
+    files?: string[];
+  };
+
+  assert.equal(packageJson.version, APP_VERSION);
+  assert.ok(packageJson.files?.includes("tui/vetala"));
 });
 
 test("SessionStore persists pinned skills across reload", async () => {

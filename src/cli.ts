@@ -30,7 +30,8 @@ program
   .option("--model <model>", "Override the model for this run")
   .action(async (options) => {
     const { spawn } = await import("node:child_process");
-    const { readFile } = await import("node:fs/promises");
+    const { constants } = await import("node:fs");
+    const { access, readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
     const { default: updateNotifier } = await import("update-notifier");
@@ -82,9 +83,28 @@ program
 
     // The TUI binary is built in the tui/ subdirectory relative to the project root
     const tuiBin = join(projectRoot, "tui", "vetala");
+    const missingTuiMessage =
+      `Vetala could not find its bundled TUI binary at ${tuiBin}.\n` +
+      "This install is incomplete. Reinstall a package that includes `tui/vetala`, or run `npm run dev` from a repo checkout.";
+
+    try {
+      await access(tuiBin, constants.X_OK);
+    } catch {
+      throw new Error(missingTuiMessage);
+    }
 
     const tuiProcess = spawn(tuiBin, ["--workspace", session.workspaceRoot], {
       stdio: "inherit"
+    });
+
+    tuiProcess.on("error", (error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        console.error(missingTuiMessage);
+        process.exit(1);
+        return;
+      }
+
+      throw error;
     });
 
     tuiProcess.on("close", (code) => {
