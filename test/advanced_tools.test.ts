@@ -22,7 +22,8 @@ async function createTempContext(): Promise<{ root: string; ctx: ToolContext }> 
       ensureWebAccess: async () => true
     },
     interaction: {
-      askUser: async (prompt) => "mock user response"
+      askText: async (prompt) => "mock user response",
+      askSelect: async (prompt, options) => 0
     },
     reads: {
       hasRead: () => true,
@@ -51,7 +52,7 @@ test("ask_user tool", async () => {
   const tools = createInteractionTools();
   const askTool = tools.find(t => t.name === "ask_user")!;
   
-  const result = await askTool.execute({ question: "Are you sure?" }, ctx);
+  const result = await askTool.execute({ questions: [{ type: "text", question: "Are you sure?" }] }, ctx);
   assert.equal(result.isError, false);
   assert.match(result.content, /mock user response/);
 });

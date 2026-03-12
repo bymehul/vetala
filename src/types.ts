@@ -260,7 +260,8 @@ export interface ToolContext {
     ensureWebAccess(): Promise<boolean>;
   };
   interaction: {
-    askUser(prompt: string): Promise<string>;
+    askText(prompt: string, placeholder?: string): Promise<string>;
+    askSelect(prompt: string, options: string[]): Promise<number>;
   };
   reads: {
     hasRead(path: string): boolean;

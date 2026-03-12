@@ -27,6 +27,14 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.4.1-dev
+
+- **Sequential Interactive Prompts**: Upgraded the `ask_user` tool to support arrays of questions (both text and multiple-choice), asking the user sequentially instead of dumping them all into one prompt.
+- **Smart API Retry Loop**: Vetala now automatically intercepts provider API errors (like unexpected token limits or `fetch failed` drops) without crashing. It injects an automatic prompt hint back to the AI so the AI can correct itself and retry!
+- **Broader Approval Contexts**: The "Allow for session" option is now vastly smarter. Approving a file write now auto-approves all file writes (`edit_file:*`) for the session, and approving an NPM install auto-approves all subsequent dependency installs (`run_shell:pkg_install`), minimizing prompt fatigue.
+- **Interactive Update Notifier**: Replaced the default `update-notifier` with a custom startup prompt. It pauses the TUI launch if an update is found, allowing you to install it instantly or snooze it.
+- **Note on Vision Tools**: The `analyze_image` tool remains in the CLI but true vision testing is ongoing. Text-only models are still gracefully warned to avoid hallucinations.
+
 ### v0.4.0-dev
 
 - **Advanced Cross-Platform Tools**: Added 6 new semantic and interactive tools (`ask_user`, `analyze_image`, `read_docs`, `get_diagnostics`, `list_exports`, `find_references`, `ast_replace`, `semantic_search`).

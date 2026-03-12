@@ -212,7 +212,12 @@ function consumeEvents(
       continue;
     }
 
-    const chunk = JSON.parse(data) as StreamChunk;
+    let chunk: StreamChunk;
+    try {
+      chunk = JSON.parse(data) as StreamChunk;
+    } catch {
+      continue; // Skip malformed JSON chunks
+    }
 
     for (const choice of chunk.choices ?? []) {
       if (choice.delta?.content) {

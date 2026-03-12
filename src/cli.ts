@@ -35,14 +35,41 @@ program
     const { access, readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
-    const { default: updateNotifier } = await import("update-notifier");
+    const { checkForAppUpdate, installAppUpdate, snoozeAppUpdate } = await import("./update-notifier.js");
 
     const __dirname = fileURLToPath(new URL(".", import.meta.url));
     const isDist = __dirname.includes("dist");
     const projectRoot = join(__dirname, isDist ? "../../" : "../");
-    const pkg = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8"));
 
-    updateNotifier({ pkg }).notify();
+    const update = await checkForAppUpdate();
+    if (update && stdin.isTTY && stdout.isTTY) {
+      const rl = readline.createInterface({ input: stdin, output: stdout });
+      try {
+        console.log(`\n\x1b[36m╭────────────────────────────────────────────────────────╮\x1b[0m`);
+        console.log(`\x1b[36m│\x1b[0m Update available! \x1b[31m${update.currentVersion}\x1b[0m → \x1b[32m${update.latestVersion}\x1b[0m                \x1b[36m│\x1b[0m`);
+        console.log(`\x1b[36m╰────────────────────────────────────────────────────────╯\x1b[0m\n`);
+        
+        const answer = await rl.question(`Run '${update.installCommand}' now? [Y/n/snooze]: `);
+        const choice = answer.trim().toLowerCase();
+        
+        if (choice === "s" || choice === "snooze") {
+          await snoozeAppUpdate(update.latestVersion);
+          console.log("Update snoozed for 24 hours.\n");
+        } else if (choice === "" || choice === "y" || choice === "yes") {
+          console.log("Installing update...");
+          try {
+            const result = await installAppUpdate(update.latestVersion);
+            console.log(result.stdout || result.stderr);
+            console.log("Update complete! Please run vetala again.");
+            process.exit(0);
+          } catch (err) {
+            console.error("Failed to install update:", err);
+          }
+        }
+      } finally {
+        rl.close();
+      }
+    }
 
     let config = await loadConfig();
     const runtimeProfile = detectRuntimeHostProfile();
@@ -175,6 +202,12 @@ async function runOneShot(
         if (!rl) return placeholder;
         const answer = await rl.question(`${title}${placeholder ? ` (${placeholder})` : ''}: `);
         return answer || placeholder;
+      },
+      requestSelect: async (title, options) => {
+        if (!rl) return 0;
+        const answer = await rl.question(`${title}\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}\nChoice (1-${options.length}): `);
+        const parsed = parseInt(answer, 10);
+        return isNaN(parsed) || parsed < 1 || parsed > options.length ? 0 : parsed - 1;
       }
     });
 

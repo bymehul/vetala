@@ -29,6 +29,7 @@ export interface AgentOptions {
   tools: ToolRegistry;
   ui: TerminalUI;
   requestTextInput: (title: string, placeholder: string) => Promise<string>;
+  requestSelect: (title: string, options: string[]) => Promise<number>;
 }
 
 export class Agent {
@@ -81,9 +82,9 @@ export class Agent {
     }
 
     const seenToolCalls = new Set<string>();
-    const maxLoops = 100;
+    let consecutiveApiErrors = 0;
 
-    for (let turnIndex = 0; turnIndex < maxLoops; turnIndex += 1) {
+    while (true) {
       this.throwIfStopped();
       const conversation = compactConversation(
         this.options.session.messages,
@@ -103,17 +104,34 @@ export class Agent {
 
       try {
         turn = await this.completeTurn(requestMessages, streaming);
+        consecutiveApiErrors = 0; // Reset on success
       } catch (error) {
         if (isAbortError(error) || error instanceof AgentInterruptedError) {
           this.options.ui.endAssistantTurn();
           throw new AgentInterruptedError();
         }
 
-        await this.appendAndRenderAssistantMessage(
-          error instanceof Error ? error.message : String(error),
-          true
-        );
-        return;
+        consecutiveApiErrors += 1;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
+        if (consecutiveApiErrors >= 3) {
+          await this.appendAndRenderAssistantMessage(
+            `I've encountered multiple consecutive API errors and must stop. Last error: ${errorMessage}`,
+            true
+          );
+          return;
+        }
+
+        this.options.ui.warn(`API Error: ${errorMessage}`);
+        this.options.ui.activity("Retrying automatically...");
+        
+        const syntheticUserMessage = this.persistedMessage({
+          role: "user",
+          content: `SYSTEM ALERT: The previous generation failed with an API error: ${errorMessage}\nIf you were generating a large file, you likely hit the maximum output token limit. Please try breaking your response down, or use the append_to_file tool to write large files in chunks.`
+        });
+        await this.options.sessionStore.appendMessage(this.options.session, syntheticUserMessage);
+        
+        continue;
       }
 
       const assistantMessage = this.persistedMessage({
@@ -168,8 +186,6 @@ export class Agent {
         );
       }
     }
-
-    throw new Error("Agent reached the maximum tool loop depth.");
   }
 
   private async completeTurn(messages: ChatMessage[], streaming: boolean): Promise<StreamedAssistantTurn> {
@@ -253,7 +269,8 @@ export class Agent {
         ensureWebAccess: () => this.options.approvals.ensureWebAccess()
       },
       interaction: {
-        askUser: (prompt) => this.options.requestTextInput("Vetala asks", prompt)
+        askText: (prompt, placeholder = "") => this.options.requestTextInput(prompt, placeholder),
+        askSelect: (prompt, options) => this.options.requestSelect(prompt, options)
       },
       reads: {
         hasRead: (targetPath) => this.options.session.readFiles.includes(targetPath),
@@ -319,21 +336,32 @@ export class Agent {
         : "The full conversation is attached because the session is still short.",
       "",
       "# CORE REASONING & TOOL PROTOCOL (CRITICAL)",
-      "1. PLAN BEFORE ACTING: Always explicitly formulate a plan. For complex tasks, break them down. Use tools systematically to explore the environment.",
-      "2. EMPIRICAL VERIFICATION (NO HALLUCINATIONS): Never assume the contents of a file, the structure of a project, or the existence of a command. ALWAYS use tools to verify your assumptions before editing code.",
-      "3. VALIDATE YOUR WORK: After making changes (via write_file, apply_patch, or run_shell), use search, read, or test commands to strictly confirm the changes were applied correctly and the code compiles/runs.",
-      "4. PREFER SPECIFIC TOOLS: If a specialized tool exists (e.g., search_repo, read_file), use it instead of running generic shell commands (e.g., 'grep' or 'cat' via run_shell).",
-      "5. INCREMENTAL PROGRESS: Take small, verified steps. If a tool call fails, analyze the error, adjust your approach, and try again. Do not silently ignore errors or pretend they succeeded.",
-      "6. CONCISE COMMUNICATION: Keep your text responses incredibly concise. Do not mechanically narrate your tool usage. Focus on the technical outcome, strategy, or blocking issues.",
+      "1. PLAN BEFORE ACTING: Decompose complex tasks into ordered subtasks. Identify unknowns, risks, and dependencies before touching any file. State your plan explicitly for non-trivial work.",
+      "2. EMPIRICAL VERIFICATION — NO HALLUCINATIONS: Never assume file contents, project structure, API signatures, or command availability. Read before you write. Grep before you guess. Stat before you create.",
+      "3. VALIDATE EVERY CHANGE: After write_file, apply_patch, or run_shell, confirm the change took effect. Run the relevant test, lint, or compile step. If it fails, diagnose and fix — do not proceed on a broken foundation.",
+      "4. USE THE RIGHT TOOL: Prefer search_repo over shell grep, read_file over cat, apply_patch for surgical edits over full rewrites. Reserve run_shell for tasks no built-in tool covers.",
+      "5. INCREMENTAL, REVERSIBLE STEPS: Make the smallest change that moves the task forward. Verify. Then proceed. Never batch unverified changes — one silent failure can corrupt the entire task.",
+      "6. HANDLE ERRORS EXPLICITLY: If a tool call fails or returns unexpected output, stop, analyse the error, and adapt. Never silently swallow errors or continue as if they succeeded.",
+      "7. CONCISE COMMUNICATION: Be terse. Narrate intent and blockers, not tool mechanics. One sentence per action is usually enough.",
       "",
-      "# WORKFLOW GUIDELINES",
-      "- Exploration: Start with `search_repo` or directory listing to map the codebase context.",
-      "- Comprehension: Use `read_file` to understand exact context before proposing modifications.",
-      "- Modification: Use `apply_patch` for surgical edits or `write_file` for new files. Follow up by running tests/linters via `run_shell` if applicable.",
-      "- Wait/Delay: If a command needs time before the next check, use `sleep`.",
-      "- Long Commands: Set `timeout_ms` explicitly for slow builds or test runs in `run_shell`.",
-      "- Web Research: If unsure about APIs, dependency versions, or obscure errors, use `web_search` or `stack_overflow_search` instead of guessing.",
-      "- Skills: Use the `skill` tool whenever a task aligns with a local skill. It supports list, load, read, pin, unpin.",
+      "# AGENTIC CODING PRINCIPLES",
+      "- CONTEXT FIRST: Before editing any file, read its full relevant section. Blind edits introduce regressions. Understand the call-site, the type signatures, and the surrounding invariants.",
+      "- DEPENDENCY AWARENESS: When adding or upgrading a package, check the existing lockfile and package manifest first. Confirm version compatibility. Prefer pinned versions in new dependencies.",
+      "- TEST-DRIVEN CONFIRMATION: After implementing a feature or fix, locate or write a minimal test or reproducer and run it. A passing test is the only acceptable proof of correctness.",
+      "- SCOPE DISCIPLINE: Fix what you were asked to fix. If you discover adjacent issues, report them but do not silently refactor unrelated code. Scope creep breaks reviewer trust.",
+      "- IDEMPOTENT OPERATIONS: Prefer changes that are safe to run multiple times. Guard file creation with existence checks. Guard shell commands with dry-run flags where available.",
+      "- RESPECT PROJECT CONVENTIONS: Match the existing code style, naming patterns, import ordering, and file layout. Read a neighbouring file for 30 seconds before writing a new one.",
+      "- SECURITY BY DEFAULT: Never embed secrets, tokens, or credentials. Prefer env-var lookups. Flag any code path that logs, stores, or transmits user data.",
+      "",
+      "# WORKFLOW PLAYBOOK",
+      "- Exploration : `search_repo` or directory listing → build a mental map before touching anything.",
+      "- Comprehension : `read_file` on every file you intend to modify. Understand the full context.",
+      "- Implementation : `apply_patch` for targeted edits; `write_file` only for new files or full rewrites.",
+      "- Verification : run tests/linters via `run_shell`; read back changed files to confirm correctness.",
+      "- Long-running tasks : set `timeout_ms` explicitly for builds and test suites. Use `sleep` between polling steps.",
+      "- Uncertainty : use `web_search` or `stack_overflow_search` for unfamiliar APIs, error messages, or version quirks — never guess.",
+      "- Skills : invoke the `skill` tool (list / load / read / pin / unpin) whenever a task aligns with an available skill.",
+      "- Shell fallback : use `run_shell` only when no built-in tool suffices. If a command requires interaction or elevated privileges, tell the user to run it manually.",
       "",
       "Do not repeat identical tool calls in the same turn. Treat follow-up requests as continuing the current task.",
       "",

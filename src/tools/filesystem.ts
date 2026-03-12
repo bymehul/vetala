@@ -4,7 +4,7 @@ import { buildDiffPreview, lcsDiff } from "../edits/diff.js";
 import type { ToolContext, ToolResult, ToolSpec } from "../types.js";
 import { searchRepo, searchRepoSymbol } from "./repo-search.js";
 
-const MAX_READ_LINES = 400;
+const MAX_READ_LINES = 2000;
 const DEFAULT_SEARCH_LIMIT = 20;
 const DEFAULT_SYMBOL_LIMIT = 3;
 const DEFAULT_SYMBOL_CONTEXT = 20;
@@ -150,12 +150,32 @@ const readFileTool: ToolSpec = {
   async execute(rawArgs, context) {
     const args = expectObject(rawArgs);
     const target = await context.paths.ensureReadable(requiredString(args.path, "path"));
-    const fileContent = await readFile(target, "utf8");
-    const lines = fileContent.split("\n");
-    const startLine = integerOrDefault(args.startLine, 1);
-    const endLine = integerOrDefault(args.endLine, Math.min(lines.length, startLine + MAX_READ_LINES - 1));
+    
+    try {
+      const stats = await stat(target);
+      if (stats.isDirectory()) {
+        return {
+          summary: `Cannot read ${target}`,
+          content: `${target} is a directory, not a file. Please use the list_dir tool to explore its contents.`,
+          isError: true,
+          referencedFiles: [target]
+        };
+      }
+      
+      const fileContent = await readFile(target, "utf8");
+      const lines = fileContent.split("\n");
+      const startLine = integerOrDefault(args.startLine, 1);
+      const endLine = integerOrDefault(args.endLine, Math.min(lines.length, startLine + MAX_READ_LINES - 1));
 
-    return renderReadSlice(target, lines, startLine, endLine);
+      return renderReadSlice(target, lines, startLine, endLine);
+    } catch (error) {
+      return {
+        summary: `Failed to read ${target}`,
+        content: error instanceof Error ? error.message : String(error),
+        isError: true,
+        referencedFiles: [target]
+      };
+    }
   }
 };
 
@@ -187,10 +207,30 @@ const readFileChunkTool: ToolSpec = {
     const target = await context.paths.ensureReadable(requiredString(args.path, "path"));
     const startLine = requiredInteger(args.startLine, "startLine");
     const endLine = requiredInteger(args.endLine, "endLine");
-    const fileContent = await readFile(target, "utf8");
-    const lines = fileContent.split("\n");
+    
+    try {
+      const stats = await stat(target);
+      if (stats.isDirectory()) {
+        return {
+          summary: `Cannot read ${target}`,
+          content: `${target} is a directory, not a file. Please use the list_dir tool to explore its contents.`,
+          isError: true,
+          referencedFiles: [target]
+        };
+      }
 
-    return renderReadSlice(target, lines, startLine, endLine);
+      const fileContent = await readFile(target, "utf8");
+      const lines = fileContent.split("\n");
+
+      return renderReadSlice(target, lines, startLine, endLine);
+    } catch (error) {
+      return {
+        summary: `Failed to read ${target}`,
+        content: error instanceof Error ? error.message : String(error),
+        isError: true,
+        referencedFiles: [target]
+      };
+    }
   }
 };
 
@@ -301,7 +341,7 @@ const writeFileTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "write_file",
-      key: `edit_file:${target}`,
+      key: "edit_file:*",
       label: [
         "Allow writing file?",
         `path: ${target}`,
@@ -362,7 +402,7 @@ const appendToFileTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "write_file",
-      key: `edit_file:${target}`,
+      key: "edit_file:*",
       label: [
         "Allow appending to file?",
         `path: ${target}`,
@@ -446,7 +486,7 @@ const applyPatchTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "replace_in_file",
-      key: `edit_file:${target}`,
+      key: "edit_file:*",
       label: [
         "Allow patching file?",
         `path: ${target}`,
@@ -517,7 +557,7 @@ const replaceInFileTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "replace_in_file",
-      key: `edit_file:${target}`,
+      key: "edit_file:*",
       label: [
         "Allow editing file?",
         `path: ${target}`,
@@ -560,7 +600,7 @@ const moveFileTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "run_shell",
-      key: `move_file:${source}:${destination}`,
+      key: "edit_file:*",
       label: `Allow moving file?\nFrom: ${source}\nTo: ${destination}`
     });
 
@@ -608,7 +648,7 @@ const deleteFileTool: ToolSpec = {
 
     const approved = await context.approvals.requestApproval({
       kind: "run_shell",
-      key: `delete_file:${target}`,
+      key: "edit_file:*",
       label: `Allow deleting file?\nPath: ${target}`
     });
 
@@ -669,10 +709,22 @@ function renderReadSlice(target: string, lines: string[], startLine: number, end
   }
 
   const boundedEndLine = Math.min(lines.length, Math.min(endLine, startLine + MAX_READ_LINES - 1));
+  let content = renderNumberedLines(lines, startLine, boundedEndLine);
+
+  if (boundedEndLine < lines.length && boundedEndLine === startLine + MAX_READ_LINES - 1) {
+    content = [
+      "IMPORTANT: The file content has been truncated.",
+      `Status: Showing lines ${startLine}-${boundedEndLine} of ${lines.length} total lines.`,
+      `Action: To read more of the file, you can use the 'startLine' and 'endLine' parameters in a subsequent 'read_file' call. For example, to read the next section of the file, use startLine: ${boundedEndLine + 1}.`,
+      "",
+      "--- FILE CONTENT (truncated) ---",
+      content
+    ].join("\n");
+  }
 
   return {
     summary: `Read ${target} lines ${startLine}-${boundedEndLine}`,
-    content: renderNumberedLines(lines, startLine, boundedEndLine),
+    content,
     isError: false,
     referencedFiles: [target],
     readFiles: [target]

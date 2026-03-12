@@ -52,9 +52,14 @@ const runShellTool: ToolSpec = {
     const timeoutMs = optionalTimeoutMs(args.timeout_ms);
 
     if (!isReadOnlyCommand(command)) {
+      let key = `run_shell:${command}`;
+      if (command.match(/(^|\s*&&\s*)(npm|pnpm|yarn|bun)\s+(i|install|add)\b/)) {
+        key = "run_shell:pkg_install";
+      }
+
       const approved = await context.approvals.requestApproval({
         kind: "run_shell",
-        key: `run_shell:${command}`,
+        key,
         label: `Allow shell command?\n${command}`
       });
 

@@ -143,7 +143,8 @@ async function main(): Promise<void> {
             skills,
             tools: createTools(),
             ui,
-            requestTextInput
+            requestTextInput,
+            requestSelect
         });
         activeAgent = agent;
 

@@ -697,7 +697,8 @@ function createTestToolContext(root: string, session: SessionState, store: Sessi
       ensureWebAccess: async () => true
     },
     interaction: {
-      askUser: async (prompt) => "test response"
+      askText: async (prompt) => "test response",
+      askSelect: async (prompt, options) => 0
     },
     reads: {
       hasRead: (targetPath) => session.readFiles.includes(targetPath),
