@@ -1,5 +1,7 @@
 import { ApprovalManager } from "./approvals.js";
 import { compactConversation } from "./context-memory.js";
+import { loadMemoriesPrompt, loadRulesPrompt } from "./context-files.js";
+import { appendHistoryEntry } from "./history-store.js";
 import { PathPolicy } from "./path-policy.js";
 import { createProviderClient, getProviderDefinition, providerLabel, withSystemMessage } from "./providers/index.js";
 import { createSearchProvider } from "./search-provider.js";
@@ -59,6 +61,9 @@ export class Agent {
       content: userInput
     });
     await this.options.sessionStore.appendMessage(this.options.session, userMessage);
+    void appendHistoryEntry(this.options.config, this.options.session.id, userInput).catch(() => {
+      // Best-effort history persistence.
+    });
 
     const localGreeting = maybeLocalGreeting(userInput);
 
@@ -90,11 +95,13 @@ export class Agent {
       this.throwIfStopped();
       const conversation = compactConversation(
         this.options.session.messages,
-        this.options.session.referencedFiles
+        this.options.session.referencedFiles,
+        this.options.config.memory
       );
+      const recentCount = this.options.config.memory.recentMessageCount;
       this.options.ui.activity(
         conversation.compactedCount > 0
-          ? `Using 12 recent messages and ${conversation.compactedCount} compacted earlier messages.`
+          ? `Using ${recentCount} recent messages and ${conversation.compactedCount} compacted earlier messages.`
           : "Using the live conversation context."
       );
       const systemPrompt = await this.systemPrompt(conversation.memory, conversation.compactedCount);
@@ -321,6 +328,12 @@ export class Agent {
   private async systemPrompt(memory: string | null, compactedCount: number): Promise<string> {
     const skillInventory = await this.options.skills.inventoryPrompt();
     const pinnedSkillContext = await this.options.skills.pinnedPrompt();
+    const [rulesPrompt, persistentMemory] = await Promise.all([
+      loadRulesPrompt(this.options.config.contextFiles),
+      this.options.config.memories.useMemories
+        ? loadMemoriesPrompt(this.options.config.contextFiles)
+        : Promise.resolve(null)
+    ]);
     const lines = [
       "You are Vetala, an expert software engineer and AI coding assistant operating directly inside the user's terminal.",
       "When greeting or introducing yourself, explicitly call yourself Vetala.",
@@ -339,43 +352,21 @@ export class Agent {
       `Allowed roots right now: ${this.options.pathPolicy.allowedRoots().join(", ")}`,
       compactedCount > 0
         ? `Only the most recent messages are attached verbatim. ${compactedCount} earlier messages were compacted into working memory.`
-        : "The full conversation is attached because the session is still short.",
-      "",
-      "# CORE REASONING & TOOL PROTOCOL (CRITICAL)",
-      "1. PLAN BEFORE ACTING: Decompose complex tasks into ordered subtasks. Identify unknowns, risks, and dependencies before touching any file. State your plan explicitly for non-trivial work.",
-      "2. EMPIRICAL VERIFICATION — NO HALLUCINATIONS: Never assume file contents, project structure, API signatures, or command availability. Read before you write. Grep before you guess. Stat before you create.",
-      "3. VALIDATE EVERY CHANGE: After write_file, apply_patch, or run_shell, confirm the change took effect. Run the relevant test, lint, or compile step. If it fails, diagnose and fix — do not proceed on a broken foundation.",
-      "4. USE THE RIGHT TOOL: Prefer search_repo over shell grep, read_file over cat, apply_patch for surgical edits over full rewrites. Reserve run_shell for tasks no built-in tool covers.",
-      "5. INCREMENTAL, REVERSIBLE STEPS: Make the smallest change that moves the task forward. Verify. Then proceed. Never batch unverified changes — one silent failure can corrupt the entire task.",
-      "6. HANDLE ERRORS EXPLICITLY: If a tool call fails or returns unexpected output, stop, analyse the error, and adapt. Never silently swallow errors or continue as if they succeeded.",
-      "7. CONCISE COMMUNICATION: Be terse. Narrate intent and blockers, not tool mechanics. One sentence per action is usually enough.",
-      "",
-      "# AGENTIC CODING PRINCIPLES",
-      "- CONTEXT FIRST: Before editing any file, read its full relevant section. Blind edits introduce regressions. Understand the call-site, the type signatures, and the surrounding invariants.",
-      "- DEPENDENCY AWARENESS: When adding or upgrading a package, check the existing lockfile and package manifest first. Confirm version compatibility. Prefer pinned versions in new dependencies.",
-      "- TEST-DRIVEN CONFIRMATION: After implementing a feature or fix, locate or write a minimal test or reproducer and run it. A passing test is the only acceptable proof of correctness.",
-      "- SCOPE DISCIPLINE: Fix what you were asked to fix. If you discover adjacent issues, report them but do not silently refactor unrelated code. Scope creep breaks reviewer trust.",
-      "- IDEMPOTENT OPERATIONS: Prefer changes that are safe to run multiple times. Guard file creation with existence checks. Guard shell commands with dry-run flags where available.",
-      "- RESPECT PROJECT CONVENTIONS: Match the existing code style, naming patterns, import ordering, and file layout. Read a neighbouring file for 30 seconds before writing a new one.",
-      "- SECURITY BY DEFAULT: Never embed secrets, tokens, or credentials. Prefer env-var lookups. Flag any code path that logs, stores, or transmits user data.",
-      "",
-      "# WORKFLOW PLAYBOOK",
-      "- Exploration : `search_repo` or directory listing → build a mental map before touching anything.",
-      "- Comprehension : `read_file` on every file you intend to modify. Understand the full context.",
-      "- Implementation : `apply_patch` for targeted edits; `write_file` only for new files or full rewrites.",
-      "- Verification : run tests/linters via `run_shell`; read back changed files to confirm correctness.",
-      "- Long-running tasks : set `timeout_ms` explicitly for builds and test suites. Use `sleep` between polling steps.",
-      "- Uncertainty : use `web_search` or `stack_overflow_search` for unfamiliar APIs, error messages, or version quirks — never guess.",
-      "- Skills : invoke the `skill` tool (list / load / read / pin / unpin) whenever a task aligns with an available skill.",
-      "- Shell fallback : use `run_shell` only when no built-in tool suffices. If a command requires interaction or elevated privileges, tell the user to run it manually.",
-      "",
-      "Do not repeat identical tool calls in the same turn. Treat follow-up requests as continuing the current task.",
-      "",
-      skillInventory
+        : "The full conversation is attached because the session is still short."
     ];
+
+    if (rulesPrompt) {
+      lines.push("", rulesPrompt);
+    }
+
+    lines.push("", skillInventory);
 
     if (pinnedSkillContext) {
       lines.push("", pinnedSkillContext);
+    }
+
+    if (persistentMemory) {
+      lines.push("", persistentMemory);
     }
 
     if (memory) {

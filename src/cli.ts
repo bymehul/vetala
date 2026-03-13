@@ -7,6 +7,7 @@ import { Agent } from "./agent.js";
 import { ApprovalManager } from "./approvals.js";
 import { APP_VERSION } from "./app-meta.js";
 import { loadConfig } from "./config.js";
+import { startMemoriesPipeline } from "./memories/pipeline.js";
 import { PathPolicy } from "./path-policy.js";
 import { resolveProviderName } from "./providers/index.js";
 import { detectRuntimeHostProfile } from "./runtime-profile.js";
@@ -96,6 +97,8 @@ program
       }
     }
 
+    startMemoriesPipeline(config, store);
+
     if (options.prompt) {
       const trustedConfig = await ensureWorkspaceTrust(session.workspaceRoot, config, ui);
 
@@ -129,7 +132,11 @@ program
     }
 
     const tuiProcess = spawn(tuiBin, ["--workspace", session.workspaceRoot], {
-      stdio: "inherit"
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        VETALA_UPDATE_CHECKED: "1"
+      }
     });
 
     tuiProcess.on("error", (error) => {

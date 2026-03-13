@@ -1,9 +1,11 @@
-import type { ChatMessage, PersistedMessage } from "./types.js";
+import type { ChatMessage, MemorySettings, PersistedMessage } from "./types.js";
 
-const RECENT_MESSAGE_COUNT = 12;
-const MAX_MEMORY_EVENTS = 10;
-const MAX_PREVIEW_LENGTH = 140;
-const MAX_REFERENCED_FILES = 6;
+const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
+  recentMessageCount: 12,
+  maxMemoryEvents: 10,
+  maxPreviewLength: 140,
+  maxReferencedFiles: 6
+};
 
 export interface CompactedConversation {
   memory: string | null;
@@ -13,9 +15,10 @@ export interface CompactedConversation {
 
 export function compactConversation(
   messages: PersistedMessage[],
-  referencedFiles: string[]
+  referencedFiles: string[],
+  settings: MemorySettings = DEFAULT_MEMORY_SETTINGS
 ): CompactedConversation {
-  if (messages.length <= RECENT_MESSAGE_COUNT) {
+  if (messages.length <= settings.recentMessageCount) {
     return {
       memory: null,
       compactedCount: 0,
@@ -23,18 +26,22 @@ export function compactConversation(
     };
   }
 
-  const compactedMessages = messages.slice(0, -RECENT_MESSAGE_COUNT);
+  const compactedMessages = messages.slice(0, -settings.recentMessageCount);
 
   return {
-    memory: renderConversationMemory(compactedMessages, referencedFiles),
+    memory: renderConversationMemory(compactedMessages, referencedFiles, settings),
     compactedCount: compactedMessages.length,
-    recentMessages: stripTimestamps(messages.slice(-RECENT_MESSAGE_COUNT))
+    recentMessages: stripTimestamps(messages.slice(-settings.recentMessageCount))
   };
 }
 
-function renderConversationMemory(messages: PersistedMessage[], referencedFiles: string[]): string | null {
+function renderConversationMemory(
+  messages: PersistedMessage[],
+  referencedFiles: string[],
+  settings: MemorySettings
+): string | null {
   const summarizedEvents = messages
-    .map((message) => summarizeMessage(message))
+    .map((message) => summarizeMessage(message, settings))
     .filter((value): value is string => value !== null);
 
   if (summarizedEvents.length === 0) {
@@ -43,12 +50,12 @@ function renderConversationMemory(messages: PersistedMessage[], referencedFiles:
 
   const memoryLines = [
     `Conversation memory: ${messages.length} earlier messages compacted. Use this as prior context for follow-up requests.`,
-    ...limitEvents(summarizedEvents).map((line) => `- ${line}`)
+    ...limitEvents(summarizedEvents, settings.maxMemoryEvents).map((line) => `- ${line}`)
   ];
 
-  if (referencedFiles.length > 0) {
-    const renderedFiles = referencedFiles.slice(-MAX_REFERENCED_FILES).join(", ");
-    const extraCount = Math.max(0, referencedFiles.length - MAX_REFERENCED_FILES);
+  if (referencedFiles.length > 0 && settings.maxReferencedFiles > 0) {
+    const renderedFiles = referencedFiles.slice(-settings.maxReferencedFiles).join(", ");
+    const extraCount = Math.max(0, referencedFiles.length - settings.maxReferencedFiles);
     memoryLines.push(
       `Referenced files: ${renderedFiles}${extraCount > 0 ? `, and ${extraCount} more` : ""}`
     );
@@ -61,14 +68,21 @@ function stripTimestamps(messages: PersistedMessage[]): ChatMessage[] {
   return messages.map(({ timestamp: _timestamp, ...message }) => message);
 }
 
-function limitEvents(events: string[]): string[] {
-  if (events.length <= MAX_MEMORY_EVENTS) {
+function limitEvents(events: string[], maxEvents: number): string[] {
+  if (maxEvents <= 0) {
+    return [];
+  }
+  if (events.length <= maxEvents) {
     return events;
   }
 
-  const headCount = 4;
-  const tailCount = 4;
-  const omittedCount = events.length - headCount - tailCount;
+  if (maxEvents < 3) {
+    return events.slice(-maxEvents);
+  }
+
+  const headCount = Math.min(4, Math.max(1, Math.floor((maxEvents - 1) / 2)));
+  const tailCount = Math.min(4, Math.max(1, maxEvents - headCount - 1));
+  const omittedCount = Math.max(0, events.length - headCount - tailCount);
 
   return [
     ...events.slice(0, headCount),
@@ -77,17 +91,17 @@ function limitEvents(events: string[]): string[] {
   ];
 }
 
-function summarizeMessage(message: PersistedMessage): string | null {
+function summarizeMessage(message: PersistedMessage, settings: MemorySettings): string | null {
   if (message.role === "assistant" && message.tool_calls && message.tool_calls.length > 0) {
     const toolNames = [...new Set(message.tool_calls.map((toolCall) => toolCall.function.name).filter(Boolean))];
     const renderedTools = toolNames.length > 0 ? toolNames.join(", ") : "tools";
-    const preview = summarizeContent(message.content);
+    const preview = summarizeContent(message.content, settings.maxPreviewLength);
     return preview
       ? `Vetala called ${renderedTools} and said: ${preview}`
       : `Vetala called ${renderedTools}.`;
   }
 
-  const preview = summarizeContent(message.content);
+  const preview = summarizeContent(message.content, settings.maxPreviewLength);
 
   if (!preview) {
     return null;
@@ -105,7 +119,7 @@ function summarizeMessage(message: PersistedMessage): string | null {
   }
 }
 
-function summarizeContent(content: string | null): string | null {
+function summarizeContent(content: string | null, maxPreviewLength: number): string | null {
   if (!content) {
     return null;
   }
@@ -122,7 +136,7 @@ function summarizeContent(content: string | null): string | null {
     return null;
   }
 
-  return flattened.length > MAX_PREVIEW_LENGTH
-    ? `${flattened.slice(0, MAX_PREVIEW_LENGTH - 3)}...`
+  return flattened.length > maxPreviewLength
+    ? `${flattened.slice(0, Math.max(0, maxPreviewLength - 3))}...`
     : flattened;
 }

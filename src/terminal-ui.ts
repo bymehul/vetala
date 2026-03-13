@@ -164,6 +164,10 @@ export class TerminalUI {
         `reason:  ${config.reasoningEffort ?? "(none)"}`,
         `search:  ${config.searchProviderName}`,
         `base:    ${config.baseUrl}`,
+        `memory:  recent=${config.memory.recentMessageCount}, events=${config.memory.maxMemoryEvents}, preview=${config.memory.maxPreviewLength}, refs=${config.memory.maxReferencedFiles}`,
+        `context: files=${config.contextFiles.maxFiles}, fileBytes=${config.contextFiles.maxFileBytes}, totalBytes=${config.contextFiles.maxTotalBytes}`,
+        `history: ${config.history.persistence}${config.history.maxBytes ? ` (${config.history.maxBytes} bytes)` : ""}`,
+        `memories: enabled=${config.memories.enabled}, use=${config.memories.useMemories}, maxRollouts=${config.memories.maxRolloutsPerStartup}`,
         `host:    ${formatRuntimeHostSummary(this.runtimeProfile)}`,
         `term:    ${formatRuntimeTerminalSummary(this.runtimeProfile)}`
       ])

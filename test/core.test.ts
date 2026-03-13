@@ -6,6 +6,7 @@ import { mkdtemp, mkdir, readFile as readFsFile, writeFile } from "node:fs/promi
 import { undoLastEdit } from "../src/edit-history.js";
 import { ApprovalManager } from "../src/approvals.js";
 import { compactConversation } from "../src/context-memory.js";
+import { appendHistoryEntry } from "../src/history-store.js";
 import {
   clearSavedAuth,
   isWorkspaceTrusted,
@@ -15,6 +16,7 @@ import {
   saveChatDefaults,
   saveDefaultModel,
   savePersistentAuth,
+  saveStoredAuthValue,
   trustWorkspace,
   withSessionAuth
 } from "../src/config.js";
@@ -39,6 +41,7 @@ import {
   type AppUpdateNotifier,
   type AppUpdateStore
 } from "../src/update-notifier.js";
+import { ensureAppPaths } from "../src/xdg.js";
 import { APP_VERSION } from "../src/app-meta.js";
 import {
   BUNDLED_TUI_FILES as EXPECTED_TUI_FILES,
@@ -157,19 +160,30 @@ test("Config migrates legacy tattva XDG paths into vetala paths", async () => {
   });
 });
 
-test("Config can persist a raw API key for future sessions", async () => {
+test("Config stores only a SHA-256 fingerprint for persisted credentials", async () => {
   await withIsolatedXdg(async () => {
     await savePersistentAuth("subscription_key", "sk_live_demo");
 
     let config = await loadConfig();
     assert.equal(config.authMode, "subscription_key");
-    assert.equal(config.authValue, "sk_live_demo");
-    assert.equal(config.authSource, "stored");
+    assert.equal(config.authValue, undefined);
+    assert.equal(config.authSource, "stored_hash");
     assert.match(config.authFingerprint ?? "", /^[a-f0-9]{64}$/);
 
     await clearSavedAuth();
     config = await loadConfig();
     assert.equal(config.authSource, "missing");
+  });
+});
+
+test("Config restores encrypted stored credentials across sessions", async () => {
+  await withIsolatedXdg(async () => {
+    await saveStoredAuthValue("bearer", "sk_stored_demo");
+
+    const config = await loadConfig();
+    assert.equal(config.authSource, "stored");
+    assert.equal(config.authValue, "sk_stored_demo");
+    assert.match(config.authFingerprint ?? "", /^[a-f0-9]{64}$/);
   });
 });
 
@@ -181,7 +195,7 @@ test("Package metadata stays in sync with the bundled TUI launcher", async () =>
     files?: string[];
   };
 
-  assert.equal(pkg.version, "0.5.0");
+  assert.equal(pkg.version, "0.5.1");
   assert.deepEqual(
     EXPECTED_TUI_FILES.filter((filePath) => !pkg.files?.includes(filePath)),
     []
@@ -407,6 +421,48 @@ test("Update notifier surfaces cached updates and respects snooze", async () => 
     });
 
     assert.equal(visibleAgain?.latestVersion, "0.3.0");
+  });
+});
+
+test("History store appends entries and trims when over the max byte limit", async () => {
+  await withIsolatedXdg(async () => {
+    const baseConfig = await loadConfig();
+    const config = {
+      ...baseConfig,
+      history: {
+        persistence: "save_all" as const,
+        maxBytes: 120
+      }
+    };
+
+    await appendHistoryEntry(config, "session-1", "alpha".repeat(80));
+    await appendHistoryEntry(config, "session-1", "beta".repeat(90));
+
+    const paths = await ensureAppPaths();
+    const contents = await readFsFile(paths.historyFile, "utf8");
+    const lines = contents.split("\n").filter(Boolean);
+
+    assert.equal(lines.length, 1);
+    assert.match(lines[0] ?? "", /beta/);
+    assert.doesNotMatch(lines[0] ?? "", /alpha/);
+  });
+});
+
+test("History store skips persistence when disabled", async () => {
+  await withIsolatedXdg(async () => {
+    const baseConfig = await loadConfig();
+    const config = {
+      ...baseConfig,
+      history: {
+        persistence: "none" as const,
+        maxBytes: null
+      }
+    };
+
+    await appendHistoryEntry(config, "session-1", "hello");
+
+    const paths = await ensureAppPaths();
+    await assert.rejects(async () => readFsFile(paths.historyFile, "utf8"));
   });
 });
 

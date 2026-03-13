@@ -9,8 +9,14 @@ export interface AppPaths {
   configDir: string;
   dataDir: string;
   sessionsDir: string;
+  memoriesDir: string;
+  rulesDir: string;
+  snapshotsDir: string;
+  logsDir: string;
+  tasksDir: string;
   configFile: string;
   latestWorkspaceFile: string;
+  historyFile: string;
 }
 
 export function getAppPaths(): AppPaths {
@@ -31,8 +37,14 @@ function appPathsForName(appName: string): AppPaths {
     configDir,
     dataDir,
     sessionsDir: path.join(dataDir, "sessions"),
+    memoriesDir: path.join(dataDir, "memories"),
+    rulesDir: path.join(dataDir, "rules"),
+    snapshotsDir: path.join(dataDir, "snapshots"),
+    logsDir: path.join(dataDir, "logs"),
+    tasksDir: path.join(dataDir, "tasks"),
     configFile: path.join(configDir, "config.json"),
-    latestWorkspaceFile: path.join(dataDir, "latest-workspaces.json")
+    latestWorkspaceFile: path.join(dataDir, "latest-workspaces.json"),
+    historyFile: path.join(dataDir, "history.jsonl")
   };
 }
 
@@ -65,7 +77,12 @@ export async function ensureAppPaths(): Promise<AppPaths> {
   await Promise.all([
     mkdir(paths.configDir, { recursive: true }),
     mkdir(paths.dataDir, { recursive: true }),
-    mkdir(paths.sessionsDir, { recursive: true })
+    mkdir(paths.sessionsDir, { recursive: true }),
+    mkdir(paths.memoriesDir, { recursive: true }),
+    mkdir(paths.rulesDir, { recursive: true }),
+    mkdir(paths.snapshotsDir, { recursive: true }),
+    mkdir(paths.logsDir, { recursive: true }),
+    mkdir(paths.tasksDir, { recursive: true })
   ]);
 
   return paths;

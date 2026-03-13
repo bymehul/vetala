@@ -9,6 +9,7 @@ import { SkillRuntime } from "./skills/runtime.js";
 import { createToolRegistry } from "./tools/index.js";
 import { createSearchProvider } from "./search-provider.js";
 import { detectRuntimeHostProfile } from "./runtime-profile.js";
+import { startMemoriesPipeline } from "./memories/pipeline.js";
 import type { ApprovalRequest, ApprovalScope, SessionState } from "./types.js";
 
 interface IpcCommand {
@@ -45,15 +46,13 @@ async function main(): Promise<void> {
         session = await store.createSession(workspace, config.defaultProvider, config.defaultModel);
     }
 
+    startMemoriesPipeline(config, store);
+
     const sendReady = (s: SessionState) => {
         const profile = config.providers[s.provider];
         const isLoggedIn = !!(profile && profile.authValue);
         ui.sendReady(s, isLoggedIn);
     };
-
-    // Send the initial ready message with dashboard data
-    sendReady(session);
-    ui.sendStatus("Ready");
 
     const skills = new SkillRuntime({
         getSession: () => session,
@@ -67,6 +66,7 @@ async function main(): Promise<void> {
     });
 
     let activeAgent: Agent | null = null;
+    let lastInterruptedPrompt: string | null = null;
 
     // Pending approval resolution
     let pendingApprovalResolve: ((scope: ApprovalScope) => void) | null = null;
@@ -123,6 +123,48 @@ async function main(): Promise<void> {
         });
     };
 
+    const shouldSkipUpdateCheck = () =>
+        process.env.VETALA_UPDATE_CHECKED === "1" || process.env.VETALA_SMOKE_TEST === "1";
+
+    const maybeHandleAppUpdate = async (): Promise<void> => {
+        if (shouldSkipUpdateCheck()) {
+            return;
+        }
+
+        try {
+            const { checkForAppUpdate, installAppUpdate, snoozeAppUpdate } = await import("./update-notifier.js");
+            const update = await checkForAppUpdate();
+
+            if (!update) {
+                return;
+            }
+
+            const choice = await requestSelect(
+                `Update available: ${update.currentVersion} → ${update.latestVersion}`,
+                ["Update now", "Skip for 24 hours"]
+            );
+
+            if (choice === 0) {
+                ui.info("Installing update...");
+                try {
+                    const result = await installAppUpdate(update.latestVersion);
+                    const output = result.stdout || result.stderr;
+                    if (output.trim()) {
+                        ui.info(output);
+                    }
+                    ui.info("Update complete. Restart Vetala to use the new version.");
+                } catch (error) {
+                    ui.error(`Failed to install update: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            } else {
+                await snoozeAppUpdate(update.latestVersion);
+                ui.info("Update skipped for 24 hours.");
+            }
+        } catch {
+            // Best-effort update checks shouldn't block startup.
+        }
+    };
+
     const createTools = () =>
         createToolRegistry({
             includeWebSearch: config.searchProviderName !== "disabled",
@@ -145,33 +187,46 @@ async function main(): Promise<void> {
         }
     };
 
+    const resolveContinuation = (input: string): string | null => {
+        const normalized = input.trim().toLowerCase();
+        if (!lastInterruptedPrompt) {
+            return null;
+        }
+        if (normalized === "continue" || normalized === "resume" || normalized === "go on") {
+            return lastInterruptedPrompt;
+        }
+        return null;
+    };
+
     const runPrompt = async (prompt: string, forceRun = false): Promise<void> => {
         const trimmed = prompt.trim();
         if (!trimmed) return;
+        const resumed = resolveContinuation(trimmed);
+        const effectivePrompt = resumed ?? trimmed;
 
         // If it's a slash command, handle immediately even if agent is busy
-        if (trimmed.startsWith("/")) {
-            await handleCommand(trimmed);
+        if (effectivePrompt.startsWith("/")) {
+            await handleCommand(effectivePrompt);
             return;
         }
 
         // Busy guard: if agent is running, ask user what to do
         if (activeAgent && !forceRun) {
             const choice = await requestSelect(
-                `Current turn is still running. What to do with: "${trimmed.slice(0, 60)}"?`,
+                `Current turn is still running. What to do with: "${effectivePrompt.slice(0, 60)}"?`,
                 ["Send now (stop current turn)", "Send after current turn", "Cancel"]
             );
 
             if (choice === 0) {
                 // Force: interrupt current, then queue to run it
-                queuedNextPrompt = trimmed;
-                ui.info("Stopping the current turn and sending next prompt.");
+                queuedNextPrompt = effectivePrompt;
+                ui.info(resumed ? "Stopping the current turn and resuming the paused request." : "Stopping the current turn and sending next prompt.");
                 ui.sendStatus("Stopping current turn");
                 activeAgent.requestStop();
             } else if (choice === 1) {
                 // Queue
-                queuedNextPrompt = trimmed;
-                ui.info(`Queued next prompt: ${trimmed.slice(0, 80)}`);
+                queuedNextPrompt = effectivePrompt;
+                ui.info(resumed ? "Queued resume for the paused request." : `Queued next prompt: ${effectivePrompt.slice(0, 80)}`);
                 ui.sendStatus("Queued next prompt");
             }
             // else cancel: do nothing
@@ -199,13 +254,25 @@ async function main(): Promise<void> {
         activeAgent = agent;
 
         try {
-            await agent.runTurn(trimmed, true);
+            if (resumed) {
+                ui.info(`Resuming: ${effectivePrompt.slice(0, 80)}`);
+            }
+            await agent.runTurn(effectivePrompt, true);
             ui.sendStatus(queuedNextPrompt ? "Running queued prompt" : "Ready");
+            lastInterruptedPrompt = null;
         } catch (error) {
             if (isAgentInterruptedError(error)) {
+                lastInterruptedPrompt = effectivePrompt;
                 const refinement = await requestTextInput("Agent paused. What should I do differently?", "");
-                if (refinement.trim()) {
-                    queuedNextPrompt = refinement;
+                const refinementTrimmed = refinement.trim();
+                if (refinementTrimmed) {
+                    const refinedResume = resolveContinuation(refinementTrimmed);
+                    if (refinedResume) {
+                        queuedNextPrompt = refinedResume;
+                    } else {
+                        queuedNextPrompt = refinementTrimmed;
+                        lastInterruptedPrompt = refinementTrimmed;
+                    }
                 }
                 ui.sendStatus(queuedNextPrompt ? "Running queued prompt" : "Interrupted");
             } else {
@@ -224,7 +291,15 @@ async function main(): Promise<void> {
 
     const applyModelSelection = async (provider: string, model: string, reasoningEffort: null | "low" | "medium" | "high") => {
         const { getProviderDefinition } = await import("./providers/index.js");
-        const { saveProviderDefaults, saveProviderPersistentAuth, withProviderStoredAuth, withProviderSessionAuth, loadConfig: reloadConfig, providerConfigFor } = await import("./config.js");
+        const {
+            saveProviderDefaults,
+            saveProviderPersistentAuth,
+            saveProviderStoredAuthValue,
+            withProviderStoredAuth,
+            withProviderSessionAuth,
+            loadConfig: reloadConfig,
+            providerConfigFor
+        } = await import("./config.js");
 
         const def = getProviderDefinition(provider as any);
         await store.updateModel(session, provider as any, model);
@@ -245,14 +320,18 @@ async function main(): Promise<void> {
                 return;
             }
             const retIdx = await requestSelect("Keep credential:", [
-                "Keep for all sessions until /logout",
+                "All sessions (until /logout)",
+                "Store hash only (re-enter next session)",
                 "This session only",
                 "Cancel"
             ]);
             if (retIdx === 0) {
-                await saveProviderPersistentAuth(session.provider, def.auth.defaultMode, keyVal.trim());
+                await saveProviderStoredAuthValue(session.provider, def.auth.defaultMode, keyVal.trim());
                 config = withProviderStoredAuth(nextConfig, session.provider, def.auth.defaultMode, keyVal.trim()) as typeof config;
             } else if (retIdx === 1) {
+                await saveProviderPersistentAuth(session.provider, def.auth.defaultMode, keyVal.trim());
+                config = withProviderSessionAuth(nextConfig, session.provider, def.auth.defaultMode, keyVal.trim()) as typeof config;
+            } else if (retIdx === 2) {
                 config = withProviderSessionAuth(nextConfig, session.provider, def.auth.defaultMode, keyVal.trim()) as typeof config;
             } else {
                 ui.warn("API key setup cancelled.");
@@ -563,6 +642,12 @@ async function main(): Promise<void> {
                 process.exit(0);
         }
     });
+
+    await maybeHandleAppUpdate();
+
+    // Send the initial ready message with dashboard data
+    sendReady(session);
+    ui.sendStatus("Ready");
 
     rl.on("close", () => {
         process.exit(0);

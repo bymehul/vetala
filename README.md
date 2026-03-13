@@ -27,6 +27,17 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.5.1
+Added:
+- New data layout: `memories/`, `rules/`, `snapshots/`, `logs/`, `tasks/`, and `history.jsonl`.
+- Background memory pipeline that writes `raw_memories.md`, rollout summaries, and a consolidated `MEMORY.md`.
+- Configurable memory/context/history limits (visible in `/config`).
+- Update notifier inside the TUI flow with “update now” or “skip for 24 hours”.
+
+Patched:
+- Update checks now run before the TUI trust prompt (and won’t duplicate when launched from the CLI).
+- History persistence trims safely to the configured size cap.
+
 ### v0.5.0
 - **bugfix**: major bug fixes and performance improvements
 - **Universal Syntax Diagnostics**: Replaced the Python-only `compileall` fallback in `get_diagnostics` with `web-tree-sitter`. Vetala can now perform syntax checking across multiple languages (TypeScript, Python, Go, Rust, C, C++, Java, Ruby) directly in memory, even if you don't have the native compiler installed on your machine!

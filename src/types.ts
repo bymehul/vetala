@@ -161,7 +161,43 @@ export type SessionRecord =
 export interface ProviderSavedAuth {
   mode: "bearer" | "subscription_key";
   sha256: string;
-  value?: string;
+  encrypted?: string;
+}
+
+export interface MemorySettings {
+  recentMessageCount: number;
+  maxMemoryEvents: number;
+  maxPreviewLength: number;
+  maxReferencedFiles: number;
+}
+
+export interface ContextFileSettings {
+  maxFiles: number;
+  maxFileBytes: number;
+  maxTotalBytes: number;
+}
+
+export type HistoryPersistence = "save_all" | "none";
+
+export interface HistorySettings {
+  persistence: HistoryPersistence;
+  maxBytes: number | null;
+}
+
+export interface MemoriesSettings {
+  enabled: boolean;
+  useMemories: boolean;
+  maxRolloutsPerStartup: number;
+  maxRolloutAgeDays: number;
+  minRolloutIdleHours: number;
+  maxRawMemoriesForConsolidation: number;
+  maxUnusedDays: number;
+  rolloutMaxChars: number;
+  rawMemoryMaxChars: number;
+  rolloutSummaryMaxChars: number;
+  summaryMaxChars: number;
+  extractModel: string | null;
+  consolidationModel: string | null;
 }
 
 export interface ProviderFileConfig {
@@ -181,6 +217,10 @@ export interface FileConfig {
   };
   trustedWorkspaces?: string[];
   savedAuth?: ProviderSavedAuth;
+  memory?: Partial<MemorySettings>;
+  contextFiles?: Partial<ContextFileSettings>;
+  history?: Partial<HistorySettings>;
+  memories?: Partial<MemoriesSettings>;
 }
 
 export type AuthSource = "env" | "session" | "stored" | "stored_hash" | "missing";
@@ -209,6 +249,10 @@ export interface EffectiveConfig {
   searchProviderName: SearchProviderName;
   trustedWorkspaces: string[];
   providers: Record<ProviderName, ProviderRuntimeConfig>;
+  memory: MemorySettings;
+  contextFiles: ContextFileSettings;
+  history: HistorySettings;
+  memories: MemoriesSettings;
 }
 
 export type ApprovalKind =
