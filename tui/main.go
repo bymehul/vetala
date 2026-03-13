@@ -76,7 +76,7 @@ func main() {
 	)
 
 	// Start the reader goroutine
-	go startIPCReader(stdout, p)
+	go startIPCReader(stdout, stdin, p)
 
 	// Wait for backend to exit and quit the TUI
 	go func() {

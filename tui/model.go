@@ -146,8 +146,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if v != "" {
 				m.entries = append(m.entries, EntryData{Kind: "user", Text: v})
 				m.textInput.SetValue("")
-				m.running = true
-				m.status = "Running agent"
+
+				isCommand := strings.HasPrefix(v, "/")
+				if !isCommand {
+					m.running = true
+					m.status = "Running agent"
+				}
 
 				// Print immediately
 				toPrint := m.entries[m.lastPrintedIdx:]
@@ -228,7 +232,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MsgStatus:
 		m.status = string(msg)
-		if m.status == "Ready" || m.status == "Interrupted" || m.status == "Failed" {
+		// Reset running state for everything except explicit agent activity statuses
+		if m.status != "Running agent" && m.status != "Stopping current turn" && m.status != "Running queued prompt" {
 			m.running = false
 			m.activity = nil
 		}

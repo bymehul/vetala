@@ -27,28 +27,11 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
-### v0.4.1-dev
-
-- **Sequential Interactive Prompts**: Upgraded the `ask_user` tool to support arrays of questions (both text and multiple-choice), asking the user sequentially instead of dumping them all into one prompt.
-- **Smart API Retry Loop**: Vetala now automatically intercepts provider API errors (like unexpected token limits or `fetch failed` drops) without crashing. It injects an automatic prompt hint back to the AI so the AI can correct itself and retry!
-- **Broader Approval Contexts**: The "Allow for session" option is now vastly smarter. Approving a file write now auto-approves all file writes (`edit_file:*`) for the session, and approving an NPM install auto-approves all subsequent dependency installs (`run_shell:pkg_install`), minimizing prompt fatigue.
-- **Interactive Update Notifier**: Replaced the default `update-notifier` with a custom startup prompt. It pauses the TUI launch if an update is found, allowing you to install it instantly or snooze it.
-- **Note on Vision Tools**: The `analyze_image` tool remains in the CLI but true vision testing is ongoing. Text-only models are still gracefully warned to avoid hallucinations.
-
-### v0.4.0-dev
-
-- **Advanced Cross-Platform Tools**: Added 6 new semantic and interactive tools (`ask_user`, `analyze_image`, `read_docs`, `get_diagnostics`, `list_exports`, `find_references`, `ast_replace`, `semantic_search`).
-- **Interactive Model Refinement**: `Ctrl+C` while the agent is running no longer crashes the CLI. It gracefully pauses the agent, sends an interrupt to the backend, and opens a prompt asking how you would like to refine the agent's course.
-- **Enhanced File System Tooling**: Added `append_to_file`, `move_file`, and `delete_file` tools to give models finer-grained local workspace control and bypass JSON limits for large file rewrites.
-- **Markdown TUI Rendering**: Agent messages are now beautifully rendered in the TUI using `glamour`.
-- **Note on Vision Tools**: The `analyze_image` tool gracefully warns text-only models to avoid hallucination, but true vision testing is ongoing.
-
-### v0.3.0-dev
-
-- **Total UI Re-architecture**: Switched from React Ink to a high-performance Go + Bubble Tea TUI.
-- **Improved Tool Formatting**: Redesigned tool executions to extract and highlight key parameters (e.g., `file_path`, `command`), avoiding large raw JSON blobs.
-- **IPC Backend**: Node.js agent now runs in headless mode, commanded purely via IPC from the Go frontend.
-- **Improved Terminal Emulation**: Switched to `node-pty` for more robust shell tool execution.
+### v0.5.0
+- **bugfix**: major bug fixes and performance improvements
+- **Universal Syntax Diagnostics**: Replaced the Python-only `compileall` fallback in `get_diagnostics` with `web-tree-sitter`. Vetala can now perform syntax checking across multiple languages (TypeScript, Python, Go, Rust, C, C++, Java, Ruby) directly in memory, even if you don't have the native compiler installed on your machine!
+- **Data-Driven Language Registry**: Centralized language management and file extension mapping. Adding new language support is now a single object definition.
+- **Smart Two-Tier Checks**: Diagnostics now try native tools first (`npx tsc`, `go build`) for the highest quality errors, and transparently fall back to WASM tree-sitter parsing if the toolchain is missing.
 
 
 ## Compatibility

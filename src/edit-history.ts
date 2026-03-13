@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildDiffPreview } from "./edits/diff.js";
 import { SessionStore } from "./session-store.js";
-import type { ApprovalRequest, FileEdit, SessionState, ToolResult } from "./types.js";
+import type { ApprovalRequest, FileEdit, SessionState, ToolContext, ToolResult } from "./types.js";
 
 export function latestUndoableEdit(session: SessionState): FileEdit | null {
   for (let index = session.edits.length - 1; index >= 0; index -= 1) {
@@ -19,7 +19,8 @@ export function latestUndoableEdit(session: SessionState): FileEdit | null {
 export async function undoLastEdit(
   session: SessionState,
   store: SessionStore,
-  requestApproval: (request: ApprovalRequest) => Promise<boolean>
+  requestApproval: (request: ApprovalRequest) => Promise<boolean>,
+  context?: ToolContext
 ): Promise<ToolResult> {
   const edit = latestUndoableEdit(session);
 
@@ -43,7 +44,7 @@ export async function undoLastEdit(
       `path: ${edit.path}`,
       `summary: ${edit.summary}`,
       "",
-      buildDiffPreview(edit.path, currentContent, edit.beforeContent)
+      await buildDiffPreview(edit.path, currentContent, edit.beforeContent, 2, context)
     ].join("\n")
   });
 
@@ -65,7 +66,7 @@ export async function undoLastEdit(
     content: [
       `Reverted the last tracked edit in ${edit.path}.`,
       "",
-      buildDiffPreview(edit.path, currentContent, edit.beforeContent)
+      await buildDiffPreview(edit.path, currentContent, edit.beforeContent, 2, context)
     ].join("\n"),
     isError: false,
     referencedFiles: [edit.path]

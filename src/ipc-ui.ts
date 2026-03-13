@@ -19,13 +19,14 @@ export class IpcTerminalUI extends TerminalUI {
     }
 
     /** Send the initial dashboard / ready message */
-    sendReady(session: SessionState): void {
+    sendReady(session: SessionState, isLoggedIn: boolean): void {
         sendIPC("ready", {
             provider: session.provider,
             model: session.model,
             workspace: session.workspaceRoot,
             sessionId: session.id,
-            updatedAt: session.updatedAt
+            updatedAt: session.updatedAt,
+            isLoggedIn
         });
     }
 
@@ -154,5 +155,18 @@ export class IpcTerminalUI extends TerminalUI {
 
     sendClear(): void {
         sendIPC("clear", {});
+    }
+
+    async offloadDiff(before: string, after: string): Promise<string> {
+        const id = Math.random().toString();
+        return new Promise((resolve) => {
+            const handler = (data: any) => {
+                if (data.id === id) {
+                    process.off("message", handler); // This won't work as we are using stdout/stdin pipes
+                }
+            };
+            // I need a way to listen for responses in the backend. 
+            // The rl.on("line") in ipc-backend.ts is the right place.
+        });
     }
 }

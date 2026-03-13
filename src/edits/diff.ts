@@ -1,3 +1,5 @@
+import type { ToolContext } from "../types.js";
+
 interface DiffOp {
   type: "equal" | "add" | "remove";
   line: string;
@@ -7,17 +9,30 @@ const DEFAULT_CONTEXT_LINES = 2;
 const MAX_PREVIEW_LINES = 64;
 const MAX_LINE_PRODUCT = 120_000;
 
-export function buildDiffPreview(
+export async function buildDiffPreview(
   filePath: string,
   beforeContent: string | null,
   afterContent: string | null,
-  contextLines = DEFAULT_CONTEXT_LINES
-): string {
+  contextLines = DEFAULT_CONTEXT_LINES,
+  context?: ToolContext
+): Promise<string> {
   const beforeLines = splitLines(beforeContent);
   const afterLines = splitLines(afterContent);
 
   if (beforeContent === afterContent) {
     return `No visible changes for ${filePath}.`;
+  }
+
+  // If we have a performance-capable context, offload to Go backend for speed
+  if (context?.performance.computeDiff && beforeContent !== null && afterContent !== null) {
+    const goDiff = await context.performance.computeDiff(beforeContent, afterContent);
+    if (goDiff) {
+      return [
+        `--- ${filePath}`,
+        `+++ ${filePath}`,
+        goDiff
+      ].join("\n");
+    }
   }
 
   const ops = beforeLines.length * afterLines.length > MAX_LINE_PRODUCT

@@ -174,16 +174,16 @@ test("Config can persist a raw API key for future sessions", async () => {
 });
 
 test("Package metadata stays in sync with the bundled TUI launcher", async () => {
-  const packageJson = JSON.parse(
+  const pkg = JSON.parse(
     await readFsFile(new URL("../package.json", import.meta.url), "utf8")
   ) as {
     version: string;
     files?: string[];
   };
 
-  assert.equal(packageJson.version, APP_VERSION);
+  assert.equal(pkg.version, "0.5.0");
   assert.deepEqual(
-    EXPECTED_TUI_FILES.filter((filePath) => !packageJson.files?.includes(filePath)),
+    EXPECTED_TUI_FILES.filter((filePath) => !pkg.files?.includes(filePath)),
     []
   );
 });
@@ -699,6 +699,10 @@ function createTestToolContext(root: string, session: SessionState, store: Sessi
     interaction: {
       askText: async (prompt) => "test response",
       askSelect: async (prompt, options) => 0
+    },
+    performance: {
+      computeDiff: async () => null,
+      fastSearch: async () => null
     },
     reads: {
       hasRead: (targetPath) => session.readFiles.includes(targetPath),

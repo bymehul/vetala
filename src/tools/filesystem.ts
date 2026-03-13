@@ -277,7 +277,8 @@ const readSymbolTool: ToolSpec = {
       target,
       cwd: context.cwd,
       limit,
-      globs: stringArray(args.globs)
+      globs: stringArray(args.globs),
+      context
     });
 
     if (matches.length === 0) {
@@ -346,7 +347,7 @@ const writeFileTool: ToolSpec = {
         "Allow writing file?",
         `path: ${target}`,
         "",
-        buildDiffPreview(target, await readExistingText(target), requiredString(args.content, "content"))
+        await buildDiffPreview(target, await readExistingText(target), requiredString(args.content, "content"), 2, context)
       ].join("\n")
     });
 
@@ -407,7 +408,7 @@ const appendToFileTool: ToolSpec = {
         "Allow appending to file?",
         `path: ${target}`,
         "",
-        buildDiffPreview(target, previousContent, nextContent)
+        await buildDiffPreview(target, previousContent, nextContent, 2, context)
       ].join("\n")
     });
 
@@ -492,7 +493,7 @@ const applyPatchTool: ToolSpec = {
         `path: ${target}`,
         `changes: ${changes.length}`,
         "",
-        buildDiffPreview(target, original, applied.updated)
+        await buildDiffPreview(target, original, applied.updated, 2, context)
       ].join("\n")
     });
 
@@ -562,7 +563,7 @@ const replaceInFileTool: ToolSpec = {
         "Allow editing file?",
         `path: ${target}`,
         "",
-        buildDiffPreview(target, original, applied.updated)
+        await buildDiffPreview(target, original, applied.updated, 2, context)
       ].join("\n")
     });
 
@@ -685,7 +686,8 @@ async function executeSearchTool(args: Record<string, unknown>, context: ToolCon
     limit,
     mode: args.mode === "regex" ? "regex" : "fixed",
     caseSensitive: args.caseSensitive === true,
-    globs: stringArray(args.globs)
+    globs: stringArray(args.globs),
+    context
   });
 
   return {

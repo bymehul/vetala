@@ -1,6 +1,7 @@
 import path from "node:path";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { runExecFile } from "../process-utils.js";
+import type { ToolContext } from "../types.js";
 
 const SKIP_DIRECTORIES = new Set([
   ".git",
@@ -28,6 +29,7 @@ export interface RepoSearchOptions {
   mode?: "fixed" | "regex";
   caseSensitive?: boolean;
   globs?: string[];
+  context?: ToolContext;
 }
 
 export interface RepoSymbolSearchOptions {
@@ -36,6 +38,7 @@ export interface RepoSymbolSearchOptions {
   cwd: string;
   limit: number;
   globs?: string[];
+  context?: ToolContext;
 }
 
 export async function searchRepo(options: RepoSearchOptions): Promise<RepoSearchMatch[]> {
@@ -62,7 +65,8 @@ export async function searchRepo(options: RepoSearchOptions): Promise<RepoSearch
 
     return fallbackSearch({
       ...options,
-      globs
+      globs,
+      context: options.context as any
     });
   }
 }
@@ -76,7 +80,8 @@ export async function searchRepoSymbol(options: RepoSymbolSearchOptions): Promis
     limit: Math.max(options.limit * 6, options.limit),
     mode: "regex",
     caseSensitive: true,
-    globs: options.globs ?? []
+    globs: options.globs ?? [],
+    context: options.context as any
   });
 
   return candidates
@@ -149,7 +154,18 @@ function parseSearchMatches(output: string, limit: number): RepoSearchMatch[] {
   return matches;
 }
 
-async function fallbackSearch(options: RepoSearchOptions & { globs: string[] }): Promise<RepoSearchMatch[]> {
+async function fallbackSearch(options: RepoSearchOptions & { globs: string[]; context?: ToolContext }): Promise<RepoSearchMatch[]> {
+  // If we have a performance-capable context, offload to Go backend for speed
+  if (options.context?.performance.fastSearch) {
+    const goMatches = await options.context.performance.fastSearch(options.query, options.target, {
+      limit: options.limit,
+      regex: options.mode === "regex"
+    });
+    if (goMatches) {
+      return goMatches;
+    }
+  }
+
   const matches: RepoSearchMatch[] = [];
   const targetStats = await stat(options.target);
 

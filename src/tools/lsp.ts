@@ -1,6 +1,9 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, readdir } from "node:fs/promises";
 import { runShellCommand } from "../process-utils.js";
 import { searchRepo } from "./repo-search.js";
+import { detectLanguageByProject, detectLanguageByExtension, LANGUAGES } from "./languages.js";
+import { checkSyntaxWithTreeSitter, formatDiagnostics } from "./tree-sitter-check.js";
+import type { LanguageEntry } from "./languages.js";
 import type { ToolSpec } from "../types.js";
 import path from "node:path";
 
@@ -8,56 +11,146 @@ export function createLspTools(): ToolSpec[] {
   return [getDiagnosticsTool, findReferencesTool, listExportsTool];
 }
 
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a CLI binary is available on this machine.
+ * Uses `which` on Unix or `where` on Windows — fully cross-platform.
+ */
+async function commandExists(name: string): Promise<boolean> {
+  const checkCmd = process.platform === "win32" ? `where ${name}` : `which ${name}`;
+  try {
+    const result = await runShellCommand(checkCmd, { cwd: ".", timeoutMs: 5000, noPty: true });
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// get_diagnostics — Two-tier: native toolchain → tree-sitter fallback
+// ---------------------------------------------------------------------------
+
 const getDiagnosticsTool: ToolSpec = {
   name: "get_diagnostics",
-  description: "Get compiler errors and warnings for the project. Automatically detects TypeScript, Go, or Python to run the appropriate check.",
+  description:
+    "Get compiler errors and warnings for the project. " +
+    "Supports TypeScript, JavaScript, Go, Python, Rust, C, C++, Java, and Ruby. " +
+    "Uses the native toolchain when available; falls back to tree-sitter syntax checking otherwise.",
   jsonSchema: {
     type: "object",
     properties: {},
     additionalProperties: false
   },
   readOnly: true,
-  async execute(rawArgs, context) {
-    // Try to auto-detect language
-    const hasFile = async (name: string) => {
-      try {
-        const p = await context.paths.ensureReadable(path.join(context.workspaceRoot, name));
-        await stat(p);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-
-    let cmd = "";
-    if (await hasFile("tsconfig.json")) {
-      cmd = "npx tsc --noEmit";
-    } else if (await hasFile("go.mod")) {
-      cmd = "go build ./...";
-    } else if (await hasFile("pyproject.toml") || await hasFile("requirements.txt")) {
-      cmd = "python -m py_compile $(find . -name '*.py')"; // simple syntax check
-    } else {
+  async execute(_rawArgs, context) {
+    // 1. Scan workspace for project marker files
+    const existingFiles = new Set<string>();
+    try {
+      const entries = await readdir(context.workspaceRoot);
+      for (const e of entries) existingFiles.add(e);
+    } catch {
       return {
-        summary: "No supported project type detected",
-        content: "Could not find tsconfig.json, go.mod, or pyproject.toml to run diagnostics.",
+        summary: "Cannot read workspace",
+        content: "Failed to list workspace root directory.",
         isError: true
       };
     }
 
-    const result = await runShellCommand(cmd, { cwd: context.workspaceRoot, timeoutMs: 30000 });
-    const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
-    
-    if (result.exitCode === 0) {
-      return { summary: "No errors found", content: "No errors or warnings found.", isError: false };
+    const lang = detectLanguageByProject(existingFiles);
+
+    if (!lang) {
+      const supported = LANGUAGES.map(l => l.projectFiles.join("/")).join(", ");
+      return {
+        summary: "No supported project type detected",
+        content:
+          `Could not detect a project type. Looked for: ${supported}.\n` +
+          "Make sure you are in a project root with a recognizable config file.",
+        isError: true
+      };
     }
 
+    // 2. Tier 1 — try native toolchain if the binary is installed
+    if (lang.nativeCheck) {
+      const binAvailable = await commandExists(lang.nativeCheck.binary);
+      if (binAvailable) {
+        return runNativeCheck(lang, context.workspaceRoot);
+      }
+    }
+
+    // 3. Tier 2 — tree-sitter fallback (zero external deps)
+    if (lang.treeSitterWasmUrl) {
+      return runTreeSitterCheck(lang, context.workspaceRoot);
+    }
+
+    // 4. No checker available at all for this language
     return {
-      summary: `Found errors using ${cmd.split(" ")[0]}`,
-      content: output || "(no output but command failed)",
-      isError: true // Not necessarily a tool error, but indicates code errors
+      summary: `No diagnostics available for ${lang.label}`,
+      content:
+        `Detected a ${lang.label} project but the native toolchain (${lang.nativeCheck?.binary ?? "n/a"}) is not installed ` +
+        "and no tree-sitter grammar is configured for fallback checking.",
+      isError: true
     };
   }
 };
+
+async function runNativeCheck(lang: LanguageEntry, cwd: string) {
+  const cmd = lang.nativeCheck!.command;
+  const result = await runShellCommand(cmd, { cwd, timeoutMs: 60_000 });
+  const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+
+  if (result.exitCode === 0) {
+    return {
+      summary: `${lang.label}: no errors found (${lang.nativeCheck!.binary})`,
+      content: "No errors or warnings found.",
+      isError: false
+    };
+  }
+
+  return {
+    summary: `${lang.label}: errors found via ${lang.nativeCheck!.binary}`,
+    content: output || "(no output but command failed)",
+    isError: true
+  };
+}
+
+async function runTreeSitterCheck(lang: LanguageEntry, cwd: string) {
+  const diagnostics = await checkSyntaxWithTreeSitter(
+    cwd,
+    lang.extensions,
+    lang.treeSitterWasmUrl!
+  );
+
+  if (diagnostics === null) {
+    return {
+      summary: `Tree-sitter unavailable for ${lang.label}`,
+      content:
+        "Could not initialize tree-sitter syntax checking. " +
+        `Install the native ${lang.nativeCheck?.binary ?? lang.id} toolchain for full diagnostics.`,
+      isError: true
+    };
+  }
+
+  if (diagnostics.length === 0) {
+    return {
+      summary: `${lang.label}: no syntax errors (tree-sitter)`,
+      content: "No syntax errors found via tree-sitter analysis.",
+      isError: false
+    };
+  }
+
+  return {
+    summary: `${lang.label}: ${diagnostics.length} syntax error(s) (tree-sitter)`,
+    content: formatDiagnostics(diagnostics),
+    isError: true
+  };
+}
+
+// ---------------------------------------------------------------------------
+// find_references
+// ---------------------------------------------------------------------------
 
 const findReferencesTool: ToolSpec = {
   name: "find_references",
@@ -77,15 +170,15 @@ const findReferencesTool: ToolSpec = {
   async execute(rawArgs, context) {
     const args = expectObject(rawArgs);
     const symbol = requiredString(args.symbol, "symbol");
-    
-    // Use the existing searchRepo functionality for semantic boundaries
+
     const matches = await searchRepo({
       query: symbol,
       target: ".",
       cwd: context.workspaceRoot,
       limit: 50,
       mode: "fixed",
-      caseSensitive: true
+      caseSensitive: true,
+      context
     });
 
     if (matches.length === 0) {
@@ -100,6 +193,10 @@ const findReferencesTool: ToolSpec = {
     };
   }
 };
+
+// ---------------------------------------------------------------------------
+// list_exports — uses language registry for extension matching
+// ---------------------------------------------------------------------------
 
 const listExportsTool: ToolSpec = {
   name: "list_exports",
@@ -119,27 +216,62 @@ const listExportsTool: ToolSpec = {
   async execute(rawArgs, context) {
     const args = expectObject(rawArgs);
     const target = await context.paths.ensureReadable(requiredString(args.path, "path"));
-    
+
     const content = await readFile(target, "utf8");
     const lines = content.split("\n");
-    
+
     const exports: string[] = [];
     const ext = path.extname(target);
+    const lang = detectLanguageByExtension(ext);
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!.trim();
-      // TS/JS
-      if ((ext === ".ts" || ext === ".js" || ext === ".tsx" || ext === ".jsx") && 
-          (line.startsWith("export ") || line.startsWith("module.exports"))) {
-        exports.push(`${i + 1}: ${line}`);
-      }
-      // Python
-      else if (ext === ".py" && (line.startsWith("def ") || line.startsWith("class "))) {
-        exports.push(`${i + 1}: ${line}`);
-      }
-      // Go
-      else if (ext === ".go" && (line.startsWith("func ") || line.startsWith("type ")) && /[A-Z]/.test(line.charAt(5))) {
-        exports.push(`${i + 1}: ${line}`);
+
+      if (lang) {
+        switch (lang.id) {
+          case "typescript":
+          case "javascript":
+            if (line.startsWith("export ") || line.startsWith("module.exports")) {
+              exports.push(`${i + 1}: ${line}`);
+            }
+            break;
+          case "python":
+            if (line.startsWith("def ") || line.startsWith("class ")) {
+              exports.push(`${i + 1}: ${line}`);
+            }
+            break;
+          case "go":
+            if ((line.startsWith("func ") || line.startsWith("type ")) && /[A-Z]/.test(line.charAt(5))) {
+              exports.push(`${i + 1}: ${line}`);
+            }
+            break;
+          case "rust":
+            if (line.startsWith("pub fn ") || line.startsWith("pub struct ") || line.startsWith("pub enum ") || line.startsWith("pub trait ")) {
+              exports.push(`${i + 1}: ${line}`);
+            }
+            break;
+          case "java":
+            if (line.startsWith("public ")) {
+              exports.push(`${i + 1}: ${line}`);
+            }
+            break;
+          case "ruby":
+            if (line.startsWith("def ") || line.startsWith("class ") || line.startsWith("module ")) {
+              exports.push(`${i + 1}: ${line}`);
+            }
+            break;
+          default:
+            // Fallback heuristic for unknown languages
+            if (line.startsWith("export ") || line.startsWith("pub ") || line.startsWith("public ")) {
+              exports.push(`${i + 1}: ${line}`);
+            }
+        }
+      } else {
+        // No language match — try generic export heuristics
+        if (line.startsWith("export ") || line.startsWith("module.exports") ||
+          line.startsWith("pub ") || line.startsWith("public ")) {
+          exports.push(`${i + 1}: ${line}`);
+        }
       }
     }
 
@@ -155,6 +287,10 @@ const listExportsTool: ToolSpec = {
     };
   }
 };
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 function expectObject(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {

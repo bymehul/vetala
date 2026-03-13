@@ -208,7 +208,9 @@ async function runOneShot(
         const answer = await rl.question(`${title}\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}\nChoice (1-${options.length}): `);
         const parsed = parseInt(answer, 10);
         return isNaN(parsed) || parsed < 1 || parsed > options.length ? 0 : parsed - 1;
-      }
+      },
+      computeDiff: async () => null,
+      fastSearch: async () => null
     });
 
     await agent.runTurn(prompt, stdout.isTTY);

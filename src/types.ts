@@ -263,6 +263,10 @@ export interface ToolContext {
     askText(prompt: string, placeholder?: string): Promise<string>;
     askSelect(prompt: string, options: string[]): Promise<number>;
   };
+  performance: {
+    computeDiff(before: string, after: string): Promise<string | null>;
+    fastSearch(query: string, root: string, options?: { limit?: number; regex?: boolean }): Promise<any[] | null>;
+  };
   reads: {
     hasRead(path: string): boolean;
     registerRead(path: string): Promise<void>;

@@ -7,6 +7,7 @@ import { PathPolicy } from "./path-policy.js";
 import { SessionStore } from "./session-store.js";
 import { SkillRuntime } from "./skills/runtime.js";
 import { createToolRegistry } from "./tools/index.js";
+import { createSearchProvider } from "./search-provider.js";
 import { detectRuntimeHostProfile } from "./runtime-profile.js";
 import type { ApprovalRequest, ApprovalScope, SessionState } from "./types.js";
 
@@ -44,8 +45,14 @@ async function main(): Promise<void> {
         session = await store.createSession(workspace, config.defaultProvider, config.defaultModel);
     }
 
+    const sendReady = (s: SessionState) => {
+        const profile = config.providers[s.provider];
+        const isLoggedIn = !!(profile && profile.authValue);
+        ui.sendReady(s, isLoggedIn);
+    };
+
     // Send the initial ready message with dashboard data
-    ui.sendReady(session);
+    sendReady(session);
     ui.sendStatus("Ready");
 
     const skills = new SkillRuntime({
@@ -65,6 +72,8 @@ async function main(): Promise<void> {
     let pendingApprovalResolve: ((scope: ApprovalScope) => void) | null = null;
     const pendingSelects = new Map<string, (index: number) => void>();
     const pendingInputs = new Map<string, (value: string) => void>();
+    const pendingDiffs = new Map<string, (diff: string) => void>();
+    const pendingSearches = new Map<string, (matches: any[]) => void>();
 
     const requestApprovalDecision = (request: ApprovalRequest): Promise<ApprovalScope> => {
         return new Promise<ApprovalScope>((resolve) => {
@@ -89,6 +98,31 @@ async function main(): Promise<void> {
         });
     };
 
+    const computeDiff = (before: string, after: string): Promise<string | null> => {
+        return new Promise((resolve) => {
+            const id = Math.random().toString();
+            pendingDiffs.set(id, resolve);
+            process.stdout.write(JSON.stringify({ tag: "compute_diff", data: { id, before, after } }) + "\n");
+        });
+    };
+
+    const fastSearch = (query: string, root: string, opts?: { limit?: number; regex?: boolean }): Promise<any[] | null> => {
+        return new Promise((resolve) => {
+            const id = Math.random().toString();
+            pendingSearches.set(id, resolve);
+            process.stdout.write(JSON.stringify({
+                tag: "fast_search",
+                data: {
+                    id,
+                    query,
+                    root,
+                    limit: opts?.limit ?? 100,
+                    regex: opts?.regex ?? false
+                }
+            }) + "\n");
+        });
+    };
+
     const createTools = () =>
         createToolRegistry({
             includeWebSearch: config.searchProviderName !== "disabled",
@@ -96,10 +130,30 @@ async function main(): Promise<void> {
         });
 
     let queuedNextPrompt: string | null = null;
+    let processingPrompt = false;
+    const promptQueue: string[] = [];
+
+    const processPromptQueue = async () => {
+        if (processingPrompt || promptQueue.length === 0) return;
+        processingPrompt = true;
+        const prompt = promptQueue.shift()!;
+        try {
+            await runPrompt(prompt);
+        } finally {
+            processingPrompt = false;
+            void processPromptQueue();
+        }
+    };
 
     const runPrompt = async (prompt: string, forceRun = false): Promise<void> => {
         const trimmed = prompt.trim();
         if (!trimmed) return;
+
+        // If it's a slash command, handle immediately even if agent is busy
+        if (trimmed.startsWith("/")) {
+            await handleCommand(trimmed);
+            return;
+        }
 
         // Busy guard: if agent is running, ask user what to do
         if (activeAgent && !forceRun) {
@@ -124,12 +178,6 @@ async function main(): Promise<void> {
             return;
         }
 
-        // If it's a slash command, handle simply
-        if (trimmed.startsWith("/")) {
-            await handleCommand(trimmed);
-            return;
-        }
-
         ui.sendStatus("Running agent");
 
         const approvals = new ApprovalManager(session, store, null, requestApprovalDecision);
@@ -144,7 +192,9 @@ async function main(): Promise<void> {
             tools: createTools(),
             ui,
             requestTextInput,
-            requestSelect
+            requestSelect,
+            computeDiff,
+            fastSearch
         });
         activeAgent = agent;
 
@@ -190,7 +240,7 @@ async function main(): Promise<void> {
             const keyVal = await requestTextInput(`Enter ${authLabel} for ${def.label} / ${model}`, "");
             if (!keyVal.trim()) {
                 ui.warn(`Credential entry cancelled. Model settings saved, but no usable ${def.label} credential is active.`);
-                ui.sendReady(session);
+                sendReady(session);
                 ui.sendStatus("Ready");
                 return;
             }
@@ -206,7 +256,7 @@ async function main(): Promise<void> {
                 config = withProviderSessionAuth(nextConfig, session.provider, def.auth.defaultMode, keyVal.trim()) as typeof config;
             } else {
                 ui.warn("API key setup cancelled.");
-                ui.sendReady(session);
+                sendReady(session);
                 ui.sendStatus("Ready");
                 return;
             }
@@ -215,7 +265,7 @@ async function main(): Promise<void> {
         }
 
         ui.info(`Provider set to ${def.label} / ${model}`);
-        ui.sendReady(session);
+        sendReady(session);
         ui.sendStatus("Ready");
     };
 
@@ -229,6 +279,7 @@ async function main(): Promise<void> {
                     "/history", "/resume <session-id>", "/new",
                     "/approve", "/config", "/logout", "/clear", "/exit"
                 ].join("\n"));
+                ui.sendStatus("Ready");
                 break;
             case "clear":
                 ui.sendClear();
@@ -245,6 +296,7 @@ async function main(): Promise<void> {
                         })
                         .join("\n") || "(empty session)"
                 );
+                ui.sendStatus("Ready");
                 break;
             case "tools":
                 ui.info(
@@ -253,14 +305,49 @@ async function main(): Promise<void> {
                         .map((tool) => `${tool.readOnly ? "ro" : "rw"} ${tool.name} - ${tool.description}`)
                         .join("\n")
                 );
+                ui.sendStatus("Ready");
                 break;
             case "config":
                 ui.printConfig(config);
+                ui.sendStatus("Ready");
                 break;
             case "undo": {
                 const { undoLastEdit } = await import("./edit-history.js");
                 const approvals = new ApprovalManager(session, store, null, requestApprovalDecision);
-                const result = await undoLastEdit(session, store, (req) => approvals.requestApproval(req));
+                // Create a temporary tool context for the undo command
+                const context = {
+                    cwd: process.cwd(),
+                    workspaceRoot: session.workspaceRoot,
+                    approvals: {
+                        requestApproval: (request: ApprovalRequest) => approvals.requestApproval(request),
+                        hasSessionGrant: (key: string) => approvals.hasSessionGrant(key),
+                        registerReference: (targetPath: string) => store.appendReference(session, targetPath),
+                        ensureWebAccess: () => approvals.ensureWebAccess()
+                    },
+                    interaction: {
+                        askText: (prompt: string, placeholder = "") => requestTextInput(prompt, placeholder),
+                        askSelect: (prompt: string, options: string[]) => requestSelect(prompt, options)
+                    },
+                    performance: {
+                        computeDiff,
+                        fastSearch
+                    },
+                    reads: {
+                        hasRead: (targetPath: string) => session.readFiles.includes(targetPath),
+                        registerRead: (targetPath: string) => store.appendReadFile(session, targetPath)
+                    },
+                    edits: {
+                        recordEdit: (edit: any) => store.appendEdit(session, edit)
+                    },
+                    paths: {
+                        resolve: (inputPath: string) => new PathPolicy(session.workspaceRoot, approvals).resolve(inputPath),
+                        ensureReadable: (inputPath: string) => new PathPolicy(session.workspaceRoot, approvals).ensureReadable(inputPath),
+                        ensureWritable: (inputPath: string) => new PathPolicy(session.workspaceRoot, approvals).ensureWritable(inputPath),
+                        allowedRoots: () => new PathPolicy(session.workspaceRoot, approvals).allowedRoots()
+                    },
+                    searchProvider: createSearchProvider(config.searchProviderName)
+                };
+                const result = await undoLastEdit(session, store, (req) => approvals.requestApproval(req), context);
                 ui.info(result.content);
                 ui.sendStatus(result.isError ? "Undo blocked" : "Ready");
                 break;
@@ -275,6 +362,7 @@ async function main(): Promise<void> {
                             ? available.map((s) => `${pinned.has(s.name) ? "*" : "-"} ${s.name} - ${s.description}`).join("\n")
                             : "(no skills available)"
                     );
+                    ui.sendStatus("Ready");
                     break;
                 }
                 const [sub, ...rest] = args;
@@ -290,12 +378,13 @@ async function main(): Promise<void> {
                     const cleared = await skills.clearPinnedSkills();
                     ui.info(`Cleared ${cleared} pinned skills.`);
                 }
+                ui.sendStatus("Ready");
                 break;
             }
             case "resume": {
                 if (!args[0]) {
                     const sessions = await store.listSessions();
-                    if (sessions.length === 0) { ui.info("(no sessions)"); break; }
+                    if (sessions.length === 0) { ui.info("(no sessions)"); ui.sendStatus("Ready"); break; }
 
                     const items = sessions.slice(0, 10).map(s => `${s.id.slice(0, 8)}  ${s.provider}/${s.model}  ${s.workspaceRoot}`);
                     const idx = await requestSelect("Select session to resume", [...items, "Cancel"]);
@@ -306,7 +395,7 @@ async function main(): Promise<void> {
                             activeAgent = null;
                             ui.sendClear();
                             ui.sendStatus(`Resumed ${session.id.slice(0, 8)}`);
-                            ui.sendReady(session);
+                            sendReady(session);
                         }
                     } else {
                         ui.sendStatus("Ready");
@@ -316,14 +405,14 @@ async function main(): Promise<void> {
                 session = await store.loadSession(args[0]);
                 ui.sendClear();
                 ui.sendStatus(`Resumed ${session.id.slice(0, 8)}`);
-                ui.sendReady(session);
+                sendReady(session);
                 break;
             }
             case "new": {
                 session = await store.createSession(session.workspaceRoot, config.defaultProvider, config.defaultModel);
                 ui.sendClear();
                 ui.sendStatus(`Created ${session.id.slice(0, 8)}`);
-                ui.sendReady(session);
+                sendReady(session);
                 break;
             }
             case "approve":
@@ -332,12 +421,20 @@ async function main(): Promise<void> {
                     `path grants: ${session.approvals.outOfTreeRoots.join(", ") || "(none)"}`,
                     `session grants: ${session.approvals.sessionActionKeys.join(", ") || "(none)"}`
                 ].join("\n"));
+                ui.sendStatus("Ready");
                 break;
             case "logout": {
+                activeAgent?.requestStop();
                 const { clearProviderSavedAuth } = await import("./config.js");
                 await clearProviderSavedAuth(session.provider);
                 ui.info(`Cleared saved credential for ${session.provider}.`);
-                ui.sendStatus("Logged out");
+                sendReady(session);
+                ui.sendStatus("Ready");
+                break;
+            }
+            case "exit": {
+                activeAgent?.requestStop();
+                process.exit(0);
                 break;
             }
             case "model": {
@@ -396,7 +493,8 @@ async function main(): Promise<void> {
         switch (cmd.tag) {
             case "input":
                 if (cmd.data?.text && typeof cmd.data.text === "string") {
-                    await runPrompt(cmd.data.text);
+                    promptQueue.push(cmd.data.text);
+                    void processPromptQueue();
                 }
                 break;
 
@@ -431,6 +529,28 @@ async function main(): Promise<void> {
                     if (resolve) {
                         pendingInputs.delete(id);
                         resolve(cmd.data.value);
+                    }
+                }
+                break;
+
+            case "diffResult":
+                if (cmd.data?.id && typeof cmd.data.diff === "string") {
+                    const id = cmd.data.id as string;
+                    const resolve = pendingDiffs.get(id);
+                    if (resolve) {
+                        pendingDiffs.delete(id);
+                        resolve(cmd.data.diff);
+                    }
+                }
+                break;
+
+            case "searchResult":
+                if (cmd.data?.id && Array.isArray(cmd.data.matches)) {
+                    const id = cmd.data.id as string;
+                    const resolve = pendingSearches.get(id);
+                    if (resolve) {
+                        pendingSearches.delete(id);
+                        resolve(cmd.data.matches);
                     }
                 }
                 break;

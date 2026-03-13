@@ -30,6 +30,8 @@ export interface AgentOptions {
   ui: TerminalUI;
   requestTextInput: (title: string, placeholder: string) => Promise<string>;
   requestSelect: (title: string, options: string[]) => Promise<number>;
+  computeDiff?: (before: string, after: string) => Promise<string | null>;
+  fastSearch?: (query: string, root: string, options?: { limit?: number; regex?: boolean }) => Promise<any[] | null>;
 }
 
 export class Agent {
@@ -271,6 +273,10 @@ export class Agent {
       interaction: {
         askText: (prompt, placeholder = "") => this.options.requestTextInput(prompt, placeholder),
         askSelect: (prompt, options) => this.options.requestSelect(prompt, options)
+      },
+      performance: {
+        computeDiff: (before, after) => this.options.computeDiff ? this.options.computeDiff(before, after) : Promise.resolve(null),
+        fastSearch: (query, root, opts) => this.options.fastSearch ? this.options.fastSearch(query, root, opts) : Promise.resolve(null)
       },
       reads: {
         hasRead: (targetPath) => this.options.session.readFiles.includes(targetPath),

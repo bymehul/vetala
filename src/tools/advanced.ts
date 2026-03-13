@@ -44,7 +44,8 @@ const semanticSearchTool: ToolSpec = {
         cwd: context.workspaceRoot,
         limit: 10,
         mode: "fixed",
-        caseSensitive: false
+        caseSensitive: false,
+        context
       });
 
       for (const match of matches) {
@@ -98,7 +99,8 @@ const astReplaceTool: ToolSpec = {
     const pattern = requiredString(args.pattern, "pattern");
     const replacement = requiredString(args.replacement, "replacement");
 
-    const checkSg = await runShellCommand("which sg", { cwd: context.workspaceRoot });
+    const whichCmd = process.platform === "win32" ? "where sg" : "which sg";
+    const checkSg = await runShellCommand(whichCmd, { cwd: context.workspaceRoot });
     if (checkSg.exitCode !== 0) {
       return {
         summary: "ast-grep (sg) not installed",
@@ -119,7 +121,9 @@ const astReplaceTool: ToolSpec = {
 
     // Run sg rewrite
     // Usage: sg run -p 'pattern' -r 'replacement' target
-    const cmd = `sg run -p '${pattern.replace(/'/g, "'\\''")}' -r '${replacement.replace(/'/g, "'\\''")}' ${target}`;
+    const p = quoteArg(pattern);
+    const r = quoteArg(replacement);
+    const cmd = `sg run -p ${p} -r ${r} ${target}`;
     const result = await runShellCommand(cmd, { cwd: context.workspaceRoot });
 
     if (result.exitCode !== 0) {
@@ -138,6 +142,16 @@ const astReplaceTool: ToolSpec = {
     };
   }
 };
+
+function quoteArg(arg: string): string {
+  if (process.platform === "win32") {
+    // Windows cmd.exe uses double quotes. Escape inner double quotes with backslash.
+    return `"${arg.replace(/"/g, '\\"')}"`;
+  }
+  // Unix shells use single quotes. Escape inner single quotes by ending the string, 
+  // adding an escaped single quote, and restarting.
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
 
 function expectObject(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {

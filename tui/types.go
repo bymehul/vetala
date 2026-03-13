@@ -11,11 +11,12 @@ type ServerMsg struct {
 }
 
 type DashboardData struct {
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Workspace string `json:"workspace"`
-	SessionId string `json:"sessionId"`
-	UpdatedAt string `json:"updatedAt"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Workspace  string `json:"workspace"`
+	SessionId  string `json:"sessionId"`
+	UpdatedAt  string `json:"updatedAt"`
+	IsLoggedIn bool   `json:"isLoggedIn"`
 }
 
 type EntryData struct {
@@ -48,6 +49,21 @@ type PromptData struct {
 	Title       string   `json:"title"`       // For "select" / "input"
 	Options     []string `json:"options"`     // For "select"
 	Placeholder string   `json:"placeholder"` // For "input"
+}
+
+type MsgComputeDiff struct {
+	Id     string `json:"id"`
+	Before string `json:"before"`
+	After  string `json:"after"`
+}
+
+type MsgFastSearch struct {
+	Id     string   `json:"id"`
+	Query  string   `json:"query"`
+	Root   string   `json:"root"`
+	Globs  []string `json:"globs"`
+	Limit  int      `json:"limit"`
+	Regex  bool     `json:"regex"`
 }
 
 type MsgReady DashboardData
@@ -100,4 +116,20 @@ type ClientMsgSubmitSelect struct {
 type ClientMsgSubmitInput struct {
 	Id    string `json:"id"`
 	Value string `json:"value"`
+}
+
+type ClientMsgDiffResult struct {
+	Id   string `json:"id"`
+	Diff string `json:"diff"`
+}
+
+type SearchMatch struct {
+	FilePath   string `json:"filePath"`
+	LineNumber int    `json:"lineNumber"`
+	LineText   string `json:"lineText"`
+}
+
+type ClientMsgSearchResult struct {
+	Id      string        `json:"id"`
+	Matches []SearchMatch `json:"matches"`
 }

@@ -115,6 +115,12 @@ func (m model) renderDashboard() string {
 		"",
 		m.renderDetailRow("provider", m.dashboard.Provider),
 		m.renderDetailRow("model", m.dashboard.Model),
+		m.renderDetailRow("auth", func() string {
+			if m.dashboard.IsLoggedIn {
+				return accentStyle.Render("Logged In")
+			}
+			return warnStyle.Render("Logged Out")
+		}()),
 		m.renderDetailRow("directory", m.dashboard.Workspace),
 		m.renderDetailRow("session", m.dashboard.SessionId),
 	)
