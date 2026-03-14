@@ -27,6 +27,15 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.5.2
+Added:
+- `/resume` now skips empty sessions and previews the last few messages when resuming.
+- Workspace auto-resume uses the most recent non-empty session.
+
+Patched:
+- Resume selection list starts at the top and scrolls cleanly for longer lists.
+- Modal transitions no longer leave duplicate empty boxes.
+
 ### v0.5.1
 Added:
 - New data layout: `memories/`, `rules/`, `snapshots/`, `logs/`, `tasks/`, and `history.jsonl`.

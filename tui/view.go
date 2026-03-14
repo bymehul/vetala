@@ -45,16 +45,26 @@ func (m model) View() string {
 
 	var midSection string
 	if m.modalState != ModalNone {
-		modalH := 15 // Fixed approx height for modals in inline mode
+		modalH := 15 // Default approx height for modals in inline mode
+		if m.modalState == ModalSelect {
+			modalH = m.visibleSelectRows() + 6
+		}
+		maxH := m.height - 4
+		if maxH < 10 {
+			maxH = 10
+		}
+		if modalH > maxH {
+			modalH = maxH
+		}
+		if modalH < 10 {
+			modalH = 10
+		}
 		modalStr := lipgloss.Place(
 			m.width-2, modalH,
 			lipgloss.Center, lipgloss.Center,
 			m.renderModal(),
 		)
-		midSection = borderStyle.Copy().
-			Width(m.width - 2).
-			Height(modalH).
-			Render(modalStr)
+		midSection = modalStr
 	} else {
 		midSection = m.renderLiveStatus()
 	}
@@ -75,11 +85,28 @@ func (m model) View() string {
 		parts = append(parts, slashBox)
 	}
 	parts = append(parts, footerStr)
-
-	return lipgloss.JoinVertical(
+	viewStr := lipgloss.JoinVertical(
 		lipgloss.Left,
 		parts...,
 	)
+
+	if m.modalJustClosed && m.height > 0 {
+		currentHeight := lipgloss.Height(viewStr)
+		if currentHeight < m.height {
+			blankWidth := m.width
+			if blankWidth < 1 {
+				blankWidth = 1
+			}
+			blankLine := strings.Repeat(" ", blankWidth)
+			pad := m.height - currentHeight
+			padLines := strings.TrimRight(strings.Repeat(blankLine+"\n", pad), "\n")
+			if padLines != "" {
+				viewStr += "\n" + padLines
+			}
+		}
+	}
+
+	return viewStr
 }
 
 func (m model) renderInputBox() string {
@@ -330,8 +357,13 @@ func (m model) renderLiveStatus() string {
 func (m model) renderModal() string {
 	var content string
 
+	selected := m.modalSelection
+	if m.modalState == ModalSelect && m.modalSelectReset {
+		selected = 0
+	}
+
 	cursor := func(idx int, text string) string {
-		if m.modalSelection == idx {
+		if selected == idx {
 			return accentStyle.Render("❯ " + text)
 		}
 		return "  " + text
@@ -388,8 +420,57 @@ func (m model) renderModal() string {
 	case ModalSelect:
 		var items []string
 		items = append(items, accentStyle.Render(m.promptSelectTitle), "")
-		for i, opt := range m.promptSelectOptions {
-			items = append(items, cursor(i, fmt.Sprintf("%d. %s", i+1, opt)))
+		total := len(m.promptSelectOptions)
+		visible := m.visibleSelectRows()
+		if visible < 1 {
+			visible = 1
+		}
+		if visible > total {
+			visible = total
+		}
+		start := selected - (visible / 2)
+		if start < 0 {
+			start = 0
+		}
+		if start > total {
+			start = total
+		}
+		end := start + visible
+		if end > total {
+			end = total
+			start = end - visible
+			if start < 0 {
+				start = 0
+			}
+		}
+		if selected < start {
+			start = selected
+			if start < 0 {
+				start = 0
+			}
+			end = start + visible
+			if end > total {
+				end = total
+			}
+		}
+		if selected >= end {
+			start = selected - visible + 1
+			if start < 0 {
+				start = 0
+			}
+			end = start + visible
+			if end > total {
+				end = total
+			}
+		}
+		for i := start; i < end; i++ {
+			items = append(items, cursor(i, fmt.Sprintf("%d. %s", i+1, m.promptSelectOptions[i])))
+		}
+		if end < total {
+			items = append(items, mutedStyle.Render("… more (↓)"))
+		}
+		if start > 0 {
+			items = append(items, mutedStyle.Render("… more (↑)"))
 		}
 		items = append(items, "", mutedStyle.Render("Press Up/Down and Enter"))
 		content = lipgloss.JoinVertical(lipgloss.Left, items...)
@@ -481,7 +562,7 @@ var slashCommands = []slashSuggestion{
 	{"skill", "/skill", "List, pin, inspect, and read local skills"},
 	{"tools", "/tools", "List available tools"},
 	{"history", "/history", "Show recent message history"},
-	{"resume", "/resume ", "Resume a prior session"},
+	{"resume", "/resume ", "Resume a session (latest/index/id)"},
 	{"new", "/new", "Start a fresh session"},
 	{"approve", "/approve", "Show active approvals"},
 	{"config", "/config", "Show runtime config"},

@@ -8,6 +8,8 @@ type IpcTag =
     | "activity" | "spinner" | "status"
     | "prompt" | "clear";
 
+type EntryKind = "user" | "assistant" | "tool" | "info" | "warn" | "error" | "activity";
+
 function sendIPC(tag: IpcTag, data: Record<string, unknown> = {}): void {
     const msg = JSON.stringify({ tag, data });
     process.stdout.write(msg + "\n");
@@ -57,6 +59,10 @@ export class IpcTerminalUI extends TerminalUI {
 
     override error(message: string): void {
         sendIPC("entry", { kind: "error", text: message });
+    }
+
+    sendEntry(kind: EntryKind, text: string): void {
+        sendIPC("entry", { kind, text });
     }
 
     override startSpinner(label: string): Ora {

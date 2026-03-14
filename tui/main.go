@@ -22,10 +22,29 @@ type backendCommand struct {
 
 func main() {
 	if len(os.Args) < 3 || os.Args[1] != "--workspace" {
-		fmt.Println("Usage: tui --workspace <dir>")
+		fmt.Println("Usage: tui --workspace <dir> [--session <id>]")
 		os.Exit(1)
 	}
-	workspace := os.Args[2]
+	workspace := ""
+	sessionId := ""
+
+	for i := 1; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--workspace":
+			if i+1 < len(os.Args) {
+				workspace = os.Args[i+1]
+			}
+		case "--session":
+			if i+1 < len(os.Args) {
+				sessionId = os.Args[i+1]
+			}
+		}
+	}
+
+	if workspace == "" {
+		fmt.Println("Usage: tui --workspace <dir> [--session <id>]")
+		os.Exit(1)
+	}
 
 	executablePath, err := os.Executable()
 	if err != nil {
@@ -33,7 +52,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	backend, err := resolveBackendCommand(executablePath, workspace)
+	backend, err := resolveBackendCommand(executablePath, workspace, sessionId)
 	if err != nil {
 		fmt.Println("Error resolving backend:", err)
 		os.Exit(1)
@@ -90,15 +109,19 @@ func main() {
 	}
 }
 
-func resolveBackendCommand(executablePath string, workspace string) (backendCommand, error) {
+func resolveBackendCommand(executablePath string, workspace string, sessionId string) (backendCommand, error) {
 	packageRoot := resolvePackageRoot(executablePath)
 	distBackend := filepath.Join(packageRoot, "dist", "src", "ipc-backend.js")
+	sessionArgs := []string{}
+	if sessionId != "" {
+		sessionArgs = []string{"--session", sessionId}
+	}
 
 	if fileExists(distBackend) {
 		return backendCommand{
 			Dir:  packageRoot,
 			File: "node",
-			Args: []string{distBackend, "--workspace", workspace},
+			Args: append([]string{distBackend, "--workspace", workspace}, sessionArgs...),
 		}, nil
 	}
 
@@ -107,7 +130,7 @@ func resolveBackendCommand(executablePath string, workspace string) (backendComm
 		return backendCommand{
 			Dir:  packageRoot,
 			File: "npx",
-			Args: []string{"tsx", sourceBackend, "--workspace", workspace},
+			Args: append([]string{"tsx", sourceBackend, "--workspace", workspace}, sessionArgs...),
 		}, nil
 	}
 

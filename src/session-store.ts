@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { appendFile, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, readFile, readdir, writeFile, realpath } from "node:fs/promises";
 import { ensureAppPaths } from "./xdg.js";
 import type {
   ApprovalEvent,
@@ -9,6 +9,7 @@ import type {
   ProviderName,
   SessionListItem,
   SessionRecord,
+  SessionResumeItem,
   SessionState
 } from "./types.js";
 
@@ -19,6 +20,16 @@ const EMPTY_APPROVALS = {
 };
 
 export class SessionStore {
+  private async listSessionStates(): Promise<SessionState[]> {
+    const paths = await ensureAppPaths();
+    const entries = await readdir(paths.sessionsDir, { withFileTypes: true });
+    const ids = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+      .map((entry) => entry.name.replace(/\.jsonl$/, ""));
+
+    return Promise.all(ids.map((id) => this.loadSession(id)));
+  }
+
   async createSession(workspaceRoot: string, providerOrModel: ProviderName | string, maybeModel?: string): Promise<SessionState> {
     const paths = await ensureAppPaths();
     const id = createSessionId();
@@ -143,7 +154,18 @@ export class SessionStore {
 
   async loadLatestForWorkspace(workspaceRoot: string): Promise<SessionState | null> {
     const latest = await this.readLatestWorkspaceMap();
-    const sessionId = latest[workspaceRoot];
+    let sessionId = latest[workspaceRoot];
+
+    if (!sessionId) {
+      const normalizedTarget = await normalizeWorkspaceRoot(workspaceRoot);
+      for (const [key, value] of Object.entries(latest)) {
+        const normalizedKey = await normalizeWorkspaceRoot(key);
+        if (normalizedKey === normalizedTarget) {
+          sessionId = value;
+          break;
+        }
+      }
+    }
 
     if (!sessionId) {
       return null;
@@ -161,13 +183,7 @@ export class SessionStore {
   }
 
   async listSessions(): Promise<SessionListItem[]> {
-    const paths = await ensureAppPaths();
-    const entries = await readdir(paths.sessionsDir, { withFileTypes: true });
-    const ids = entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-      .map((entry) => entry.name.replace(/\.jsonl$/, ""));
-
-    const sessions = await Promise.all(ids.map((id) => this.loadSession(id)));
+    const sessions = await this.listSessionStates();
     return sessions
       .map((session) => ({
         id: session.id,
@@ -178,6 +194,113 @@ export class SessionStore {
         updatedAt: session.updatedAt
       }))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async listSessionSummaries(workspaceRoot?: string): Promise<SessionResumeItem[]> {
+    const sessions = await this.listSessionStates();
+    const normalizedTarget = workspaceRoot ? await normalizeWorkspaceRoot(workspaceRoot) : null;
+    const normalizedSessions = await Promise.all(
+      sessions.map(async (session) => ({
+        session,
+        normalizedRoot: await normalizeWorkspaceRoot(session.workspaceRoot)
+      }))
+    );
+    const filtered = normalizedTarget
+      ? normalizedSessions.filter((entry) => entry.normalizedRoot === normalizedTarget).map((entry) => entry.session)
+      : sessions;
+
+    const resumable = filtered.filter((session) => hasRenderableConversation(session.messages));
+
+    return resumable
+      .map((session) => ({
+        id: session.id,
+        workspaceRoot: session.workspaceRoot,
+        provider: session.provider,
+        model: session.model,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messageCount: session.messages.length,
+        preview: extractFirstUserMessage(session.messages)
+      }))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async resolveResumeSelection(
+    workspaceRoot: string,
+    selector?: string
+  ): Promise<
+    | { status: "ok"; session: SessionState; list: SessionResumeItem[] }
+    | { status: "empty"; list: SessionResumeItem[] }
+    | { status: "not_found"; list: SessionResumeItem[] }
+    | { status: "ambiguous"; list: SessionResumeItem[]; matches: SessionResumeItem[] }
+  > {
+    const sessions = await this.listSessionStates();
+    const normalizedTarget = await normalizeWorkspaceRoot(workspaceRoot);
+    const normalizedSessions = await Promise.all(
+      sessions.map(async (session) => ({
+        session,
+        normalizedRoot: await normalizeWorkspaceRoot(session.workspaceRoot)
+      }))
+    );
+    const filtered = normalizedSessions
+      .filter((entry) => entry.normalizedRoot === normalizedTarget)
+      .map((entry) => entry.session);
+    const resumable = filtered.filter((session) => hasRenderableConversation(session.messages));
+    const list = resumable
+      .map((session) => ({
+        id: session.id,
+        workspaceRoot: session.workspaceRoot,
+        provider: session.provider,
+        model: session.model,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messageCount: session.messages.length,
+        preview: extractFirstUserMessage(session.messages)
+      }))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+    if (list.length === 0) {
+      return { status: "empty", list };
+    }
+
+    const normalized = selector?.trim();
+    if (!normalized || normalized.toLowerCase() === "latest") {
+      const target = list[0]!;
+      const session = resumable.find((item) => item.id === target.id);
+      if (!session) {
+        return { status: "not_found", list };
+      }
+      return { status: "ok", session, list };
+    }
+
+    if (/^\d+$/.test(normalized)) {
+      const index = Number(normalized);
+      const byCreated = [...list].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      if (index < 1 || index > byCreated.length) {
+        return { status: "not_found", list };
+      }
+      const target = byCreated[index - 1]!;
+      const session = resumable.find((item) => item.id === target.id);
+      if (!session) {
+        return { status: "not_found", list };
+      }
+      return { status: "ok", session, list };
+    }
+
+    const matches = list.filter((item) => item.id === normalized || item.id.startsWith(normalized));
+    if (matches.length === 0) {
+      return { status: "not_found", list };
+    }
+    if (matches.length > 1) {
+      return { status: "ambiguous", list, matches };
+    }
+
+    const target = matches[0]!;
+    const session = resumable.find((item) => item.id === target.id);
+    if (!session) {
+      return { status: "not_found", list };
+    }
+    return { status: "ok", session, list };
   }
 
   async appendMessage(session: SessionState, message: PersistedMessage): Promise<void> {
@@ -356,8 +479,15 @@ export class SessionStore {
   private async updateLatestWorkspace(workspaceRoot: string, sessionId: string): Promise<void> {
     const paths = await ensureAppPaths();
     const latest = await this.readLatestWorkspaceMap();
+    const normalizedRoot = await normalizeWorkspaceRoot(workspaceRoot);
+    for (const key of Object.keys(latest)) {
+      const normalizedKey = await normalizeWorkspaceRoot(key);
+      if (normalizedKey === normalizedRoot && key !== normalizedRoot) {
+        delete latest[key];
+      }
+    }
 
-    latest[workspaceRoot] = sessionId;
+    latest[normalizedRoot] = sessionId;
     await writeFile(paths.latestWorkspaceFile, `${JSON.stringify(latest, null, 2)}\n`, "utf8");
   }
 
@@ -372,6 +502,68 @@ export class SessionStore {
   private sessionPath(sessionsDir: string, sessionId: string): string {
     return path.join(sessionsDir, `${sessionId}.jsonl`);
   }
+}
+
+function extractFirstUserMessage(messages: PersistedMessage[]): string {
+  let fallback: string | null = null;
+
+  for (const message of messages) {
+    if (message.role !== "user") {
+      continue;
+    }
+    const raw = message.content ?? "";
+    const cleaned = cleanMessage(raw);
+    if (!cleaned) {
+      continue;
+    }
+    if (!fallback) {
+      fallback = cleaned;
+    }
+    if (!isSkippableCommand(cleaned)) {
+      return cleaned;
+    }
+  }
+
+  return fallback ?? "Empty conversation";
+}
+
+function hasRenderableConversation(messages: PersistedMessage[]): boolean {
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant") {
+      continue;
+    }
+    const content = (message.content ?? "").trim();
+    if (content) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function cleanMessage(value: string): string {
+  return value
+    .replace(/\n+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[^\x20-\x7E]+/g, "")
+    .trim();
+}
+
+function isSkippableCommand(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("?");
+}
+
+async function normalizeWorkspaceRoot(root: string): Promise<string> {
+  const resolved = path.resolve(root);
+  try {
+    const canonical = await realpath(resolved);
+    return normalizePathCase(canonical);
+  } catch {
+    return normalizePathCase(resolved);
+  }
+}
+
+function normalizePathCase(value: string): string {
+  return process.platform === "win32" ? value.toLowerCase() : value;
 }
 
 function applyApproval(state: SessionState, approval: ApprovalEvent): void {

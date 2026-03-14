@@ -10,7 +10,7 @@ import { createToolRegistry } from "./tools/index.js";
 import { createSearchProvider } from "./search-provider.js";
 import { detectRuntimeHostProfile } from "./runtime-profile.js";
 import { startMemoriesPipeline } from "./memories/pipeline.js";
-import type { ApprovalRequest, ApprovalScope, SessionState } from "./types.js";
+import type { ApprovalRequest, ApprovalScope, PersistedMessage, SessionState } from "./types.js";
 
 interface IpcCommand {
     tag: string;
@@ -21,9 +21,13 @@ async function main(): Promise<void> {
     // Parse workspace from args
     const args = process.argv.slice(2);
     let workspace = process.cwd();
+    let resumeSessionId: string | null = null;
     for (let i = 0; i < args.length; i++) {
         if (args[i] === "--workspace" && i + 1 < args.length) {
             workspace = args[i + 1] as string;
+        }
+        if (args[i] === "--session" && i + 1 < args.length) {
+            resumeSessionId = args[i + 1] as string;
         }
     }
 
@@ -34,16 +38,24 @@ async function main(): Promise<void> {
 
     // Load or create a session
     let session: SessionState;
+    let isNewSession = false;
     try {
-        const sessions = await store.listSessions();
-        const matching = sessions.find((s) => s.workspaceRoot === workspace);
-        if (matching) {
-            session = await store.loadSession(matching.id);
+        if (resumeSessionId) {
+            session = await store.loadSession(resumeSessionId);
+            workspace = session.workspaceRoot;
         } else {
-            session = await store.createSession(workspace, config.defaultProvider, config.defaultModel);
+            const summaries = await store.listSessionSummaries(workspace);
+            const matching = summaries[0];
+            if (matching) {
+                session = await store.loadSession(matching.id);
+            } else {
+                session = await store.createSession(workspace, config.defaultProvider, config.defaultModel);
+                isNewSession = true;
+            }
         }
     } catch {
         session = await store.createSession(workspace, config.defaultProvider, config.defaultModel);
+        isNewSession = true;
     }
 
     startMemoriesPipeline(config, store);
@@ -52,6 +64,31 @@ async function main(): Promise<void> {
         const profile = config.providers[s.provider];
         const isLoggedIn = !!(profile && profile.authValue);
         ui.sendReady(s, isLoggedIn);
+    };
+
+    const collectResumePreview = (messages: PersistedMessage[], limit: number): PersistedMessage[] => {
+        const filtered = messages.filter((message) => {
+            if (message.role !== "user" && message.role !== "assistant") {
+                return false;
+            }
+            const content = (message.content ?? "").trim();
+            return Boolean(content);
+        });
+        if (filtered.length <= limit) {
+            return filtered;
+        }
+        return filtered.slice(-limit);
+    };
+
+    const sendResumePreview = (s: SessionState): void => {
+        const preview = collectResumePreview(s.messages, 6);
+        if (preview.length === 0) {
+            return;
+        }
+        ui.sendEntry("info", `Resumed session ${s.id.slice(0, 8)} · showing last ${preview.length} messages`);
+        for (const message of preview) {
+            ui.sendEntry(message.role as "user" | "assistant", message.content ?? "");
+        }
     };
 
     const skills = new SkillRuntime({
@@ -88,6 +125,33 @@ async function main(): Promise<void> {
             pendingSelects.set(id, resolve);
             ui.sendPromptSelect(id, title, options);
         });
+    };
+
+    const formatTimestamp = (value: string): string => {
+        if (!value) {
+            return value;
+        }
+        const trimmed = value.replace("T", " ").replace("Z", "");
+        return trimmed.length > 16 ? trimmed.slice(0, 16) : trimmed;
+    };
+
+    const truncatePreview = (value: string, maxChars = 72): string => {
+        if (value.length <= maxChars) {
+            return value;
+        }
+        if (maxChars <= 3) {
+            return value.slice(0, maxChars);
+        }
+        return `${value.slice(0, maxChars - 3)}...`;
+    };
+
+    const buildResumeIndexMap = (items: Array<{ id: string; createdAt: string }>): Map<string, number> => {
+        const sorted = [...items].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+        const map = new Map<string, number>();
+        sorted.forEach((item, index) => {
+            map.set(item.id, index + 1);
+        });
+        return map;
     };
 
     const requestTextInput = (title: string, placeholder: string): Promise<string> => {
@@ -355,7 +419,7 @@ async function main(): Promise<void> {
             case "help":
                 ui.info([
                     "/help", "/model", "/undo", "/skill", "/tools",
-                    "/history", "/resume <session-id>", "/new",
+                    "/history", "/resume [latest|index|id]", "/resume list", "/new",
                     "/approve", "/config", "/logout", "/clear", "/exit"
                 ].join("\n"));
                 ui.sendStatus("Ready");
@@ -461,30 +525,72 @@ async function main(): Promise<void> {
                 break;
             }
             case "resume": {
-                if (!args[0]) {
-                    const sessions = await store.listSessions();
-                    if (sessions.length === 0) { ui.info("(no sessions)"); ui.sendStatus("Ready"); break; }
+                const selector = args[0];
+                if (selector === "list") {
+                    const sessions = await store.listSessionSummaries(session.workspaceRoot);
+                    if (sessions.length === 0) {
+                        ui.info("(no sessions for this workspace)");
+                    } else {
+                        const indexMap = buildResumeIndexMap(sessions);
+                        const lines = sessions.map((item) => {
+                            const idx = indexMap.get(item.id) ?? 0;
+                            const preview = truncatePreview(item.preview || "(empty session)");
+                            const updated = formatTimestamp(item.updatedAt);
+                            return `#${idx} ${preview} · ${item.provider}/${item.model} · ${updated}`;
+                        });
+                        ui.info(lines.join("\n"));
+                    }
+                    ui.sendStatus("Ready");
+                    break;
+                }
 
-                    const items = sessions.slice(0, 10).map(s => `${s.id.slice(0, 8)}  ${s.provider}/${s.model}  ${s.workspaceRoot}`);
+                if (!selector) {
+                    const sessions = await store.listSessionSummaries(session.workspaceRoot);
+                    if (sessions.length === 0) { ui.info("(no sessions for this workspace)"); ui.sendStatus("Ready"); break; }
+
+                    const indexMap = buildResumeIndexMap(sessions);
+                    const maxItems = 20;
+                    const sessionsToShow = sessions.slice(0, maxItems);
+                    const items = sessionsToShow.map((item) => {
+                        const idx = indexMap.get(item.id) ?? 0;
+                        const preview = truncatePreview(item.preview || "(empty session)");
+                        const updated = formatTimestamp(item.updatedAt);
+                        return `(${idx}) ${preview} · ${item.provider}/${item.model} · ${updated}`;
+                    });
                     const idx = await requestSelect("Select session to resume", [...items, "Cancel"]);
-                    if (idx < sessions.length) {
-                        const s = sessions[idx];
+                    if (idx < sessionsToShow.length) {
+                        const s = sessionsToShow[idx];
                         if (s) {
                             session = await store.loadSession(s.id);
                             activeAgent = null;
                             ui.sendClear();
                             ui.sendStatus(`Resumed ${session.id.slice(0, 8)}`);
                             sendReady(session);
+                            sendResumePreview(session);
+                            ui.sendStatus("Ready");
                         }
                     } else {
                         ui.sendStatus("Ready");
                     }
                     break;
                 }
-                session = await store.loadSession(args[0]);
-                ui.sendClear();
-                ui.sendStatus(`Resumed ${session.id.slice(0, 8)}`);
-                sendReady(session);
+
+                const resolved = await store.resolveResumeSelection(session.workspaceRoot, selector);
+                if (resolved.status === "empty") {
+                    ui.warn("No sessions available for this workspace.");
+                } else if (resolved.status === "not_found") {
+                    ui.warn(`No session found for selector "${selector}".`);
+                } else if (resolved.status === "ambiguous") {
+                    ui.warn(`Selector "${selector}" matched multiple sessions. Use a longer id prefix.`);
+                } else {
+                    session = resolved.session;
+                    activeAgent = null;
+                    ui.sendClear();
+                    ui.sendStatus(`Resumed ${session.id.slice(0, 8)}`);
+                    sendReady(session);
+                    sendResumePreview(session);
+                }
+                ui.sendStatus("Ready");
                 break;
             }
             case "new": {
@@ -647,6 +753,9 @@ async function main(): Promise<void> {
 
     // Send the initial ready message with dashboard data
     sendReady(session);
+    if (!isNewSession) {
+        sendResumePreview(session);
+    }
     ui.sendStatus("Ready");
 
     rl.on("close", () => {

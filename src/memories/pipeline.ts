@@ -51,6 +51,10 @@ export function startMemoriesPipeline(config: EffectiveConfig, store: SessionSto
     });
 }
 
+export async function runMemoriesPipelineOnce(config: EffectiveConfig, store: SessionStore): Promise<void> {
+  await runMemoriesPipeline(config, store);
+}
+
 async function runMemoriesPipeline(config: EffectiveConfig, store: SessionStore): Promise<void> {
   if (!config.memories.enabled) {
     return;

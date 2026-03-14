@@ -27,7 +27,7 @@ program
   .description("Multi-provider coding CLI.")
   .option("-p, --prompt <prompt>", "Run a single prompt and exit")
   .option("--new", "Start a fresh session")
-  .option("--resume <sessionId>", "Resume a specific session")
+  .option("-r, --resume [sessionId]", "Resume a previous session (latest, index, or id)")
   .option("--provider <provider>", "Override the provider for this run")
   .option("--model <model>", "Override the model for this run")
   .action(async (options) => {
@@ -77,7 +77,7 @@ program
     const ui = new TerminalUI(runtimeProfile);
     const store = new SessionStore();
     const workspaceRoot = process.cwd();
-    let session = await resolveSession(store, workspaceRoot, config.defaultProvider, config.defaultModel, options);
+    let session = await resolveSession(store, workspaceRoot, config.defaultProvider, config.defaultModel, ui, options);
 
     if (session.workspaceRoot !== process.cwd()) {
       process.chdir(session.workspaceRoot);
@@ -131,7 +131,8 @@ program
       throw new Error(missingTuiMessage);
     }
 
-    const tuiProcess = spawn(tuiBin, ["--workspace", session.workspaceRoot], {
+    const tuiArgs = ["--workspace", session.workspaceRoot, "--session", session.id];
+    const tuiProcess = spawn(tuiBin, tuiArgs, {
       stdio: "inherit",
       env: {
         ...process.env,
@@ -161,10 +162,38 @@ async function resolveSession(
   workspaceRoot: string,
   defaultProvider: ProviderName,
   defaultModel: string,
-  options: { new?: boolean; resume?: string }
+  ui: TerminalUI,
+  options: { new?: boolean; resume?: string | boolean }
 ): Promise<SessionState> {
-  if (options.resume) {
-    return store.loadSession(options.resume);
+  if (options.new) {
+    return store.createSession(workspaceRoot, defaultProvider, defaultModel);
+  }
+
+  if (options.resume !== undefined) {
+    const selector =
+      typeof options.resume === "string" && options.resume.trim()
+        ? options.resume.trim()
+        : "latest";
+
+    const result = await store.resolveResumeSelection(workspaceRoot, selector);
+    if (result.status === "ok") {
+      return result.session;
+    }
+    if (result.status === "empty") {
+      ui.warn("No previous sessions found for this workspace. Starting a new session.");
+      return store.createSession(workspaceRoot, defaultProvider, defaultModel);
+    }
+    if (result.status === "ambiguous") {
+      ui.error(
+        `Resume selector "${selector}" matched multiple sessions. Use a longer session id prefix.`
+      );
+      process.exitCode = 1;
+      return store.createSession(workspaceRoot, defaultProvider, defaultModel);
+    }
+
+    ui.error(`No session found for selector "${selector}".`);
+    process.exitCode = 1;
+    return store.createSession(workspaceRoot, defaultProvider, defaultModel);
   }
 
   return store.createSession(workspaceRoot, defaultProvider, defaultModel);

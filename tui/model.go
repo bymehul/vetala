@@ -55,14 +55,26 @@ type model struct {
 	promptSelectId      string
 	promptSelectTitle   string
 	promptSelectOptions []string
+	modalSelectReset    bool
 
 	promptInputId    string
 	promptInputTitle string
 	promptInputText  string
 	modalInput       textinput.Model
+	modalScroll      int
+
+	modalJustClosed bool
 
 	// IPC Writer
 	backendWriter io.Writer
+}
+
+type MsgModalClosedReset struct{}
+
+func resetModalClosedCmd() tea.Cmd {
+	return func() tea.Msg {
+		return MsgModalClosedReset{}
+	}
 }
 
 func initialModel(w io.Writer) model {
@@ -131,7 +143,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Treat as submitting empty string to cancel
 					sendSubmitInput(m.backendWriter, m.promptInputId, "")
 					m.modalState = ModalNone
-					return m, nil
+					m.modalJustClosed = true
+					return m, resetModalClosedCmd()
 				}
 				m.modalInput, cmd = m.modalInput.Update(msg)
 				return m, cmd
@@ -255,6 +268,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.promptSelectTitle = msg.Title
 		m.promptSelectOptions = msg.Options
 		m.modalSelection = 0
+		m.modalScroll = 0
+		m.modalSelectReset = true
 
 	case MsgPromptInput:
 		m.modalState = ModalInput
@@ -271,6 +286,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activity = nil
 		cmds = append(cmds, tea.ClearScreen)
 
+	case MsgModalClosedReset:
+		m.modalJustClosed = false
+
 	case spinner.TickMsg:
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
@@ -279,7 +297,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m model) visibleSelectRows() int {
+	height := m.height - 12
+	if height < 4 {
+		height = 4
+	}
+	if height > 12 {
+		height = 12
+	}
+	return height
+}
+
 func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.modalState == ModalSelect && m.modalSelectReset {
+		m.modalSelectReset = false
+	}
 	// Determine max bounds for current modal
 	maxSel := 0
 	switch m.modalState {
@@ -302,12 +334,21 @@ func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.modalSelection < 0 {
 			m.modalSelection = 0 // we will calculate max below
 		}
+		if m.modalState == ModalSelect && m.modalSelection < m.modalScroll {
+			m.modalScroll = m.modalSelection
+		}
 		return m, nil
 	}
 	if msg.Type == tea.KeyDown || msg.String() == "j" || msg.String() == "down" {
 		m.modalSelection++
 		if m.modalSelection > maxSel {
 			m.modalSelection = maxSel
+		}
+		if m.modalState == ModalSelect {
+			visible := m.visibleSelectRows()
+			if m.modalSelection >= m.modalScroll+visible {
+				m.modalScroll = m.modalSelection - visible + 1
+			}
 		}
 		return m, nil
 	}
@@ -385,6 +426,8 @@ func (m model) triggerActiveModal() (tea.Model, tea.Cmd) {
 			m.trusted = true
 			m.status = "Ready"
 			sendTrust(m.backendWriter, true)
+			m.modalJustClosed = true
+			return m, resetModalClosedCmd()
 		} else {
 			sendExit(m.backendWriter)
 			return m, tea.Quit
@@ -398,21 +441,29 @@ func (m model) triggerActiveModal() (tea.Model, tea.Cmd) {
 		} else {
 			sendApproval(m.backendWriter, "deny")
 		}
+		m.modalJustClosed = true
+		return m, resetModalClosedCmd()
 	case ModalExit:
 		if m.modalSelection == 0 {
 			sendExit(m.backendWriter)
 			return m, tea.Quit
 		} else {
 			m.modalState = ModalNone
+			m.modalJustClosed = true
+			return m, resetModalClosedCmd()
 		}
 
 	case ModalSelect:
 		sendSubmitSelect(m.backendWriter, m.promptSelectId, m.modalSelection)
 		m.modalState = ModalNone
+		m.modalJustClosed = true
+		return m, resetModalClosedCmd()
 
 	case ModalInput:
 		sendSubmitInput(m.backendWriter, m.promptInputId, strings.TrimSpace(m.modalInput.Value()))
 		m.modalState = ModalNone
+		m.modalJustClosed = true
+		return m, resetModalClosedCmd()
 	}
 	return m, nil
 }

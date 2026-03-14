@@ -80,6 +80,11 @@ export interface SessionListItem {
   updatedAt: string;
 }
 
+export interface SessionResumeItem extends SessionListItem {
+  messageCount: number;
+  preview: string;
+}
+
 export interface SessionMetaRecord {
   type: "meta";
   id: string;
