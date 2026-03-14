@@ -17,7 +17,7 @@ func TestResolveBackendCommandPrefersDistBackend(t *testing.T) {
 	writeTestFile(t, distBackend)
 	writeTestFile(t, sourceBackend)
 
-	command, err := resolveBackendCommand(executablePath, "/tmp/workspace")
+	command, err := resolveBackendCommand(executablePath, "/tmp/workspace", "")
 	if err != nil {
 		t.Fatalf("resolveBackendCommand returned error: %v", err)
 	}
@@ -36,6 +36,24 @@ func TestResolveBackendCommandPrefersDistBackend(t *testing.T) {
 	}
 }
 
+func TestResolveBackendCommandIncludesSessionId(t *testing.T) {
+	packageRoot := t.TempDir()
+	distBackend := filepath.Join(packageRoot, "dist", "src", "ipc-backend.js")
+	executablePath := filepath.Join(packageRoot, "tui", "vetala")
+
+	writeTestFile(t, distBackend)
+
+	command, err := resolveBackendCommand(executablePath, "/tmp/workspace", "test-session")
+	if err != nil {
+		t.Fatalf("resolveBackendCommand returned error: %v", err)
+	}
+
+	expectedArgs := []string{distBackend, "--workspace", "/tmp/workspace", "--session", "test-session"}
+	if !reflect.DeepEqual(command.Args, expectedArgs) {
+		t.Fatalf("expected args %v, got %v", expectedArgs, command.Args)
+	}
+}
+
 func TestResolveBackendCommandFallsBackToSourceBackend(t *testing.T) {
 	packageRoot := t.TempDir()
 	sourceBackend := filepath.Join(packageRoot, "src", "ipc-backend.ts")
@@ -43,7 +61,7 @@ func TestResolveBackendCommandFallsBackToSourceBackend(t *testing.T) {
 
 	writeTestFile(t, sourceBackend)
 
-	command, err := resolveBackendCommand(executablePath, "/tmp/workspace")
+	command, err := resolveBackendCommand(executablePath, "/tmp/workspace", "")
 	if err != nil {
 		t.Fatalf("resolveBackendCommand returned error: %v", err)
 	}
@@ -66,7 +84,7 @@ func TestResolveBackendCommandFailsWhenBackendMissing(t *testing.T) {
 	packageRoot := t.TempDir()
 	executablePath := filepath.Join(packageRoot, "tui", "vetala")
 
-	_, err := resolveBackendCommand(executablePath, "/tmp/workspace")
+	_, err := resolveBackendCommand(executablePath, "/tmp/workspace", "")
 	if err == nil {
 		t.Fatal("expected resolveBackendCommand to fail when no backend exists")
 	}
