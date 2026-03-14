@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { appendFile, readFile, readdir, writeFile, realpath } from "node:fs/promises";
 import { ensureAppPaths } from "./xdg.js";
+import type { AppPaths } from "./xdg.js";
 import type {
   ApprovalEvent,
   FileEdit,
@@ -20,8 +21,14 @@ const EMPTY_APPROVALS = {
 };
 
 export class SessionStore {
+  constructor(private injectedPaths?: AppPaths) {}
+
+  private async getPaths(): Promise<AppPaths> {
+    return this.injectedPaths ?? ensureAppPaths();
+  }
+
   private async listSessionStates(): Promise<SessionState[]> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const entries = await readdir(paths.sessionsDir, { withFileTypes: true });
     const ids = entries
       .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
@@ -31,7 +38,7 @@ export class SessionStore {
   }
 
   async createSession(workspaceRoot: string, providerOrModel: ProviderName | string, maybeModel?: string): Promise<SessionState> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const id = createSessionId();
     const createdAt = new Date().toISOString();
     const { provider, model } = normalizeProviderAndModel(providerOrModel, maybeModel);
@@ -64,7 +71,7 @@ export class SessionStore {
   }
 
   async loadSession(sessionId: string): Promise<SessionState> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const sessionPath = this.sessionPath(paths.sessionsDir, sessionId);
     const raw = await readFile(sessionPath, "utf8");
     const lines = raw.split("\n").filter(Boolean);
@@ -304,7 +311,7 @@ export class SessionStore {
   }
 
   async appendMessage(session: SessionState, message: PersistedMessage): Promise<void> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const record: SessionRecord = {
       type: "message",
       timestamp: message.timestamp,
@@ -318,7 +325,7 @@ export class SessionStore {
   }
 
   async appendApproval(session: SessionState, approval: ApprovalEvent): Promise<void> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const record: SessionRecord = {
       type: "approval",
       approval
@@ -334,7 +341,7 @@ export class SessionStore {
       return;
     }
 
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const timestamp = new Date().toISOString();
     const record: SessionRecord = {
       type: "reference",
@@ -352,7 +359,7 @@ export class SessionStore {
       return;
     }
 
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const timestamp = new Date().toISOString();
     const record: SessionRecord = {
       type: "read",
@@ -370,7 +377,7 @@ export class SessionStore {
   }
 
   async updateModel(session: SessionState, providerOrModel: ProviderName | string, maybeModel?: string): Promise<void> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const timestamp = new Date().toISOString();
     const { provider, model } = normalizeProviderAndModel(providerOrModel, maybeModel, session.provider);
     const record: SessionRecord = {
@@ -390,7 +397,7 @@ export class SessionStore {
     session: SessionState,
     input: Omit<FileEdit, "id" | "timestamp" | "revertedAt">
   ): Promise<FileEdit> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const edit: FileEdit = {
       ...input,
       id: crypto.randomUUID(),
@@ -409,7 +416,7 @@ export class SessionStore {
   }
 
   async markEditReverted(session: SessionState, editId: string): Promise<void> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const timestamp = new Date().toISOString();
     const record: SessionRecord = {
       type: "edit_revert",
@@ -462,7 +469,7 @@ export class SessionStore {
   }
 
   private async readLatestWorkspaceMap(): Promise<Record<string, string>> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
 
     try {
       const raw = await readFile(paths.latestWorkspaceFile, "utf8");
@@ -477,7 +484,7 @@ export class SessionStore {
   }
 
   private async updateLatestWorkspace(workspaceRoot: string, sessionId: string): Promise<void> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     const latest = await this.readLatestWorkspaceMap();
     const normalizedRoot = await normalizeWorkspaceRoot(workspaceRoot);
     for (const key of Object.keys(latest)) {
@@ -492,7 +499,7 @@ export class SessionStore {
   }
 
   private async appendSkillRecord(session: SessionState, record: Extract<SessionRecord, { type: "skill" }>): Promise<void> {
-    const paths = await ensureAppPaths();
+    const paths = await this.getPaths();
     applySkillRecord(session, record);
     session.updatedAt = record.timestamp;
     await appendFile(this.sessionPath(paths.sessionsDir, session.id), `${JSON.stringify(record)}\n`, "utf8");

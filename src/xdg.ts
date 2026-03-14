@@ -23,6 +23,27 @@ export function getAppPaths(): AppPaths {
   return appPathsForName(APP_NAME);
 }
 
+export function getAppPathsFromBases(configHome: string, dataHome: string): AppPaths {
+  return appPathsForNameWithBases(APP_NAME, configHome, dataHome);
+}
+
+export async function getAppPathsForIsolatedBases(configHome: string, dataHome: string): Promise<AppPaths> {
+  const paths = appPathsForNameWithBases(APP_NAME, configHome, dataHome);
+
+  await Promise.all([
+    mkdir(paths.configDir, { recursive: true }),
+    mkdir(paths.dataDir, { recursive: true }),
+    mkdir(paths.sessionsDir, { recursive: true }),
+    mkdir(paths.memoriesDir, { recursive: true }),
+    mkdir(paths.rulesDir, { recursive: true }),
+    mkdir(paths.snapshotsDir, { recursive: true }),
+    mkdir(paths.logsDir, { recursive: true }),
+    mkdir(paths.tasksDir, { recursive: true })
+  ]);
+
+  return paths;
+}
+
 function getLegacyAppPaths(): AppPaths {
   return appPathsForName(LEGACY_APP_NAME);
 }
@@ -30,6 +51,10 @@ function getLegacyAppPaths(): AppPaths {
 function appPathsForName(appName: string): AppPaths {
   const home = os.homedir();
   const { configHome, dataHome } = resolveAppHomes(home);
+  return appPathsForNameWithBases(appName, configHome, dataHome);
+}
+
+function appPathsForNameWithBases(appName: string, configHome: string, dataHome: string): AppPaths {
   const configDir = path.join(configHome, appName);
   const dataDir = path.join(dataHome, appName);
 

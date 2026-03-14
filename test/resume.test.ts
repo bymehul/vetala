@@ -4,10 +4,12 @@ import path from "node:path";
 import test from "node:test";
 import { mkdtemp } from "node:fs/promises";
 import { SessionStore } from "../src/session-store.js";
+import { getAppPathsForIsolatedBases } from "../src/xdg.js";
+import type { AppPaths } from "../src/xdg.js";
 
 test("Session summaries include a preview and skip slash commands", async () => {
-  await withIsolatedXdg(async () => {
-    const store = new SessionStore();
+  await withIsolatedXdg(async (paths) => {
+    const store = new SessionStore(paths);
     const session = await store.createSession("/tmp/workspace", "sarvam-105b");
 
     await store.appendMessage(session, {
@@ -29,8 +31,8 @@ test("Session summaries include a preview and skip slash commands", async () => 
 });
 
 test("resolveResumeSelection supports latest, index, and id prefix", async () => {
-  await withIsolatedXdg(async () => {
-    const store = new SessionStore();
+  await withIsolatedXdg(async (paths) => {
+    const store = new SessionStore(paths);
     const workspace = "/tmp/workspace";
 
     const session1 = await store.createSession(workspace, "sarvam-105b");
@@ -71,8 +73,8 @@ test("resolveResumeSelection supports latest, index, and id prefix", async () =>
 });
 
 test("Resume listing is scoped per workspace", async () => {
-  await withIsolatedXdg(async () => {
-    const store = new SessionStore();
+  await withIsolatedXdg(async (paths) => {
+    const store = new SessionStore(paths);
     const session1 = await store.createSession("/tmp/workspace", "sarvam-105b");
     await store.appendMessage(session1, {
       role: "user",
@@ -94,8 +96,8 @@ test("Resume listing is scoped per workspace", async () => {
 });
 
 test("Empty sessions are excluded from resume summaries", async () => {
-  await withIsolatedXdg(async () => {
-    const store = new SessionStore();
+  await withIsolatedXdg(async (paths) => {
+    const store = new SessionStore(paths);
     const workspace = "/tmp/workspace";
 
     await store.createSession(workspace, "sarvam-105b");
@@ -117,16 +119,20 @@ async function delay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withIsolatedXdg(run: () => Promise<void>): Promise<void> {
+async function withIsolatedXdg(run: (paths: AppPaths) => Promise<void>): Promise<void> {
   const base = await mkdtemp(path.join(os.tmpdir(), "vetala-xdg-"));
+  const configHome = path.join(base, "config");
+  const dataHome = path.join(base, "data");
+  const paths = await getAppPathsForIsolatedBases(configHome, dataHome);
+
   const originalConfig = process.env.XDG_CONFIG_HOME;
   const originalData = process.env.XDG_DATA_HOME;
 
-  process.env.XDG_CONFIG_HOME = path.join(base, "config");
-  process.env.XDG_DATA_HOME = path.join(base, "data");
+  process.env.XDG_CONFIG_HOME = configHome;
+  process.env.XDG_DATA_HOME = dataHome;
 
   try {
-    await run();
+    await run(paths);
   } finally {
     if (originalConfig === undefined) {
       delete process.env.XDG_CONFIG_HOME;
@@ -141,3 +147,4 @@ async function withIsolatedXdg(run: () => Promise<void>): Promise<void> {
     }
   }
 }
+
