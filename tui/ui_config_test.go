@@ -23,6 +23,7 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	t.Setenv("VETALA_UI_INPUT_BG_DARK", "234")
 	t.Setenv("VETALA_UI_INPUT_BG_LIGHT", "250")
 	t.Setenv("VETALA_UI_TOGGLE_TOOL_KEYS", "alt+t,ctrl+shift+t")
+	t.Setenv("VETALA_UI_COPY_LAST_KEYS", "ctrl+y,alt+c")
 	t.Setenv("VETALA_UI_KEY_DEBUG", "true")
 	t.Setenv("VETALA_UI_MOUSE_MODE", "cell")
 	t.Setenv("VETALA_UI_ALT_SCREEN", "false")
@@ -69,6 +70,9 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	}
 	if got := uiToolToggleKeys(); len(got) != 2 || got[0] != "alt+t" || got[1] != "ctrl+shift+t" {
 		t.Fatalf("expected uiToolToggleKeys to honor env override, got %v", got)
+	}
+	if got := uiCopyLastKeys(); len(got) != 2 || got[0] != "ctrl+y" || got[1] != "alt+c" {
+		t.Fatalf("expected uiCopyLastKeys to honor env override, got %v", got)
 	}
 	if got := uiKeyDebugEnabled(); !got {
 		t.Fatal("expected uiKeyDebugEnabled to honor env override")

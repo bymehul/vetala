@@ -172,9 +172,28 @@ func uiHints() []string {
 	}
 	return []string{
 		"Hints: Ctrl+T toggles tool details.",
+		"Copy: Ctrl+Shift+C copies the last reply.",
 		"PgUp/PgDn scroll · /help shows commands · /model switches models.",
 		"Selection: use Shift+drag if mouse capture is on.",
 	}
+}
+
+func uiCopyLastKeys() []string {
+	if value, ok := envString("VETALA_UI_COPY_LAST_KEYS"); ok {
+		fields := strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == ';' || r == '\t' || r == '\n'
+		})
+		var keys []string
+		for _, f := range fields {
+			if f != "" {
+				keys = append(keys, f)
+			}
+		}
+		if len(keys) > 0 {
+			return keys
+		}
+	}
+	return []string{"ctrl+shift+c"}
 }
 
 func uiToolResultMaxLinesCompact(height int) int {
@@ -245,8 +264,8 @@ func uiContainerPadding(width int) int {
 	if width <= 0 {
 		width = 80
 	}
-	// Default to no horizontal padding; keep everything left-aligned.
-	return 0
+	// Add a subtle inset so leftmost text doesn't clip against the terminal edge.
+	return clampInt(width/200, 1, 2)
 }
 
 func uiContainerPaddingY(height int) int {

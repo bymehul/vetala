@@ -461,22 +461,34 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 	}
 	var b strings.Builder
 
+	lastAssistantIdx := -1
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Kind == "assistant" {
+			lastAssistantIdx = i
+			break
+		}
+	}
+
 	// Group historical entries into cards
+	type cardEntry struct {
+		idx   int
+		entry EntryData
+	}
 	type card struct {
-		entries []EntryData
+		entries []cardEntry
 		color   color.Color
 	}
 	var cards []card
 	var currentCard *card
 
-	for _, entry := range entries {
+	for idx, entry := range entries {
 		if entry.Kind == "user" || currentCard == nil {
 			if currentCard != nil {
 				cards = append(cards, *currentCard)
 			}
 			currentCard = &card{color: mutedColor}
 		}
-		currentCard.entries = append(currentCard.entries, entry)
+		currentCard.entries = append(currentCard.entries, cardEntry{idx: idx, entry: entry})
 
 		if entry.Kind == "error" {
 			currentCard.color = errorColor
@@ -498,11 +510,13 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 		}
 		var cardContent []string
 
-		for _, entry := range c.entries {
+		for _, item := range c.entries {
+			entry := item.entry
 			style := kindMutedStyle(entry.Kind)
 			label := kindLabel(entry.Kind)
 
 			text := entry.Text
+			isLastAssistant := entry.Kind == "assistant" && item.idx == lastAssistantIdx
 
 			if entry.Kind == "tool" {
 				if strings.HasPrefix(text, "↳") {
@@ -584,6 +598,9 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 					text = wrapText(text, innerWidth)
 				}
 				block := style.Render(label) + "\n" + text
+				if isLastAssistant {
+					block += "\n" + mutedStyle.Render("⧉ copy last reply")
+				}
 				cardContent = append(cardContent, block)
 				continue
 			}

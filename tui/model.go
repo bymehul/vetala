@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
 )
 
 type ModalState int
@@ -76,6 +77,7 @@ type model struct {
 	lastLiveEntry      bool
 
 	toggleToolKeys []string
+	copyLastKeys   []string
 	keyDebug       bool
 	lastKeyDebug   string
 	mouseMode      tea.MouseMode
@@ -155,6 +157,7 @@ func initialModel(w io.Writer) *model {
 		showToolDetails:    uiToolDetailsDefault(),
 		entriesToolDetails: uiToolDetailsDefault(),
 		toggleToolKeys:     uiToolToggleKeys(),
+		copyLastKeys:       uiCopyLastKeys(),
 		keyDebug:           uiKeyDebugEnabled(),
 		mouseMode:          uiMouseMode(),
 		altScreen:          uiAltScreen(),
@@ -203,6 +206,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showToolDetails = !m.showToolDetails
 			m.entriesDirty = true
 			m.transcriptDirty = true
+			return m, nil
+		}
+		if m.isCopyLastKey(key) || (keystroke != key && m.isCopyLastKey(keystroke)) {
+			m.copyLastAssistant()
 			return m, nil
 		}
 
@@ -437,6 +444,40 @@ func (m *model) isToggleToolKey(key string) bool {
 		}
 	}
 	return false
+}
+
+func (m *model) isCopyLastKey(key string) bool {
+	for _, k := range m.copyLastKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) copyLastAssistant() {
+	text := m.lastAssistantText()
+	if text == "" {
+		m.status = "No assistant reply to copy"
+		m.dashboardDirty = true
+		return
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		m.status = "Copy failed"
+		m.dashboardDirty = true
+		return
+	}
+	m.status = "Copied last reply"
+	m.dashboardDirty = true
+}
+
+func (m *model) lastAssistantText() string {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if m.entries[i].Kind == "assistant" {
+			return m.entries[i].Text
+		}
+	}
+	return ""
 }
 
 func (m *model) handleModalKey(key string) (tea.Model, tea.Cmd) {
