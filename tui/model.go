@@ -240,6 +240,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dashboard = DashboardData(msg)
 		m.ready = true
 		m.status = "Ready"
+		m.showDashboard = true
 		// Only show trust prompt and dashboard on first ready, not on /model re-sends
 		if !m.trusted {
 			m.modalState = ModalTrust
@@ -467,7 +468,6 @@ func (m *model) triggerActiveModal() (tea.Model, tea.Cmd) {
 			m.modalState = ModalNone
 			m.trusted = true
 			m.status = "Ready"
-			m.showDashboard = false
 			m.transcriptDirty = true
 			sendTrust(m.backendWriter, true)
 			m.modalJustClosed = true

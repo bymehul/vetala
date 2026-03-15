@@ -142,6 +142,17 @@ func uiSelectVisibleRows(height int) int {
 	return clampInt(height/2, 4, maxInt(6, height-6))
 }
 
+func uiContainerPadding(width int) int {
+	if value, ok := envInt("VETALA_UI_CONTAINER_PADDING"); ok && value >= 0 {
+		return value
+	}
+	if width <= 0 {
+		width = 80
+	}
+	// Scale lightly with terminal width; keep small by default.
+	return clampInt(width/120, 1, 2)
+}
+
 func fastSearchMaxFileBytes() int64 {
 	if value, ok := envInt("VETALA_FAST_SEARCH_MAX_FILE_BYTES"); ok && value > 0 {
 		return int64(value)

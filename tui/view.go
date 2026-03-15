@@ -60,7 +60,8 @@ func (m *model) View() string {
 	m.updateViewportLayout(contentWidth, contentHeight)
 	m.refreshTranscript()
 
-	transcriptBox := borderStyle.Copy().
+	frameStyle := m.transcriptFrameStyle()
+	transcriptBox := frameStyle.Copy().
 		Width(contentWidth).
 		Height(contentHeight).
 		Render(m.viewport.View())
@@ -107,16 +108,16 @@ func (m *model) View() string {
 
 func (m *model) transcriptBoxWidth() int {
 	if m.width > 0 {
-		return maxInt(20, m.width-2)
+		return maxInt(20, m.width)
 	}
 	if value, ok := envInt("COLUMNS"); ok && value > 0 {
-		return maxInt(20, value-2)
+		return maxInt(20, value)
 	}
 	return 80
 }
 
 func (m *model) transcriptContentWidth() int {
-	frameW, _ := borderStyle.GetFrameSize()
+	frameW, _ := m.transcriptFrameStyle().GetFrameSize()
 	return maxInt(10, m.transcriptBoxWidth()-frameW)
 }
 
@@ -137,7 +138,7 @@ func (m *model) availableTranscriptHeight(inputBox, slashBox, footerStr string) 
 }
 
 func (m *model) updateViewportLayout(boxWidth, boxHeight int) {
-	frameW, frameH := borderStyle.GetFrameSize()
+	frameW, frameH := m.transcriptFrameStyle().GetFrameSize()
 	contentWidth := maxInt(1, boxWidth-frameW)
 	contentHeight := maxInt(1, boxHeight-frameH)
 
@@ -172,6 +173,11 @@ func (m *model) renderTranscriptContent() string {
 		parts = append(parts, live)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func (m *model) transcriptFrameStyle() lipgloss.Style {
+	pad := uiContainerPadding(m.width)
+	return borderStyle.Copy().Padding(0, pad)
 }
 
 func (m model) renderInputBox() string {
