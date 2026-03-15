@@ -526,6 +526,7 @@ function toolRepeatWarningMessage(): string {
     "SYSTEM ALERT: Repeated tool calls were suppressed.",
     "Do not re-issue the same tool call in this turn.",
     "Reuse the earlier tool result and proceed with the answer.",
+    "Continue the original request; use different ranges if you need more of the file.",
     "If more information is needed, ask a clarification question instead of calling tools again."
   ].join(" ");
 }
