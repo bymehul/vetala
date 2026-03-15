@@ -144,6 +144,15 @@ export class Agent {
         continue;
       }
 
+      const hasContent = typeof turn.content === "string" && turn.content.trim().length > 0;
+      if (!hasContent && turn.toolCalls.length === 0) {
+        if (emptyResponseWarningEnabled()) {
+          this.options.ui.warn(emptyResponseWarningMessage());
+        }
+        this.options.ui.endAssistantTurn();
+        return;
+      }
+
       const assistantMessage = this.persistedMessage({
         role: "assistant",
         content: turn.content || null,
@@ -529,4 +538,17 @@ function toolRepeatWarningMessage(): string {
     "Continue the original request; use different ranges if you need more of the file.",
     "If more information is needed, ask a clarification question instead of calling tools again."
   ].join(" ");
+}
+
+function emptyResponseWarningEnabled(): boolean {
+  const value = envBool("VETALA_EMPTY_RESPONSE_WARN");
+  return value ?? true;
+}
+
+function emptyResponseWarningMessage(): string {
+  const envMessage = process.env.VETALA_EMPTY_RESPONSE_WARN_MESSAGE;
+  if (envMessage && envMessage.trim()) {
+    return envMessage.trim();
+  }
+  return "Model returned an empty response (possible context limit). Try resuming with a shorter scope.";
 }
