@@ -113,17 +113,17 @@ func uiMouseMode() tea.MouseMode {
 			return tea.MouseModeAllMotion
 		}
 	}
-	// Default to no mouse capture so terminal selection/scrollback work.
-	// Set VETALA_UI_MOUSE_MODE=cell to enable in-app mouse wheel scrolling.
-	return tea.MouseModeNone
+	// Default to cell motion so mouse wheel scrolling works out of the box.
+	// Set VETALA_UI_MOUSE_MODE=none to restore terminal selection/scrollback.
+	return tea.MouseModeCellMotion
 }
 
 func uiAltScreen() bool {
 	if value, ok := envBool("VETALA_UI_ALT_SCREEN"); ok {
 		return value
 	}
-	// Default to alt screen for reliable in-app scrolling.
-	return true
+	// Default to terminal scrollback (no alt screen).
+	return false
 }
 
 func uiKeyDebugEnabled() bool {
