@@ -42,6 +42,10 @@ func (m *model) View() string {
 
 	inputBox := m.renderInputBox()
 	footerStr := m.renderFooter()
+	var dashboardStr string
+	if m.showDashboard {
+		dashboardStr = m.renderDashboard()
+	}
 
 	var midSection string
 	var slashBox string
@@ -56,7 +60,7 @@ func (m *model) View() string {
 	}
 
 	contentWidth := m.transcriptBoxWidth()
-	contentHeight := m.availableTranscriptHeight(inputBox, slashBox, footerStr)
+	contentHeight := m.availableTranscriptHeight(inputBox, slashBox, footerStr, dashboardStr)
 	m.updateViewportLayout(contentWidth, contentHeight)
 	m.refreshTranscript()
 
@@ -77,7 +81,11 @@ func (m *model) View() string {
 		midSection = transcriptBox
 	}
 
-	parts := []string{midSection, inputBox}
+	parts := []string{}
+	if dashboardStr != "" {
+		parts = append(parts, dashboardStr)
+	}
+	parts = append(parts, midSection, inputBox)
 	if slashBox != "" {
 		parts = append(parts, slashBox)
 	}
@@ -107,13 +115,16 @@ func (m *model) View() string {
 }
 
 func (m *model) transcriptBoxWidth() int {
-	if m.width > 0 {
-		return maxInt(20, m.width)
+	width := m.width
+	if width <= 0 {
+		if value, ok := envInt("COLUMNS"); ok && value > 0 {
+			width = value
+		} else {
+			width = 80
+		}
 	}
-	if value, ok := envInt("COLUMNS"); ok && value > 0 {
-		return maxInt(20, value)
-	}
-	return 80
+	gutter := uiContainerGutter(width)
+	return maxInt(20, width-gutter)
 }
 
 func (m *model) transcriptContentWidth() int {
@@ -121,12 +132,15 @@ func (m *model) transcriptContentWidth() int {
 	return maxInt(10, m.transcriptBoxWidth()-frameW)
 }
 
-func (m *model) availableTranscriptHeight(inputBox, slashBox, footerStr string) int {
+func (m *model) availableTranscriptHeight(inputBox, slashBox, footerStr, dashboardStr string) int {
 	height := m.height
 	if height <= 0 {
 		height = 24
 	}
 	used := lipgloss.Height(inputBox) + lipgloss.Height(footerStr)
+	if dashboardStr != "" {
+		used += lipgloss.Height(dashboardStr)
+	}
 	if slashBox != "" {
 		used += lipgloss.Height(slashBox)
 	}
@@ -163,9 +177,6 @@ func (m *model) refreshTranscript() {
 
 func (m *model) renderTranscriptContent() string {
 	var parts []string
-	if m.showDashboard {
-		parts = append(parts, m.renderDashboard())
-	}
 	if transcript := m.renderCardsToPrint(m.entries); transcript != "" {
 		parts = append(parts, transcript)
 	}
@@ -176,8 +187,9 @@ func (m *model) renderTranscriptContent() string {
 }
 
 func (m *model) transcriptFrameStyle() lipgloss.Style {
-	pad := uiContainerPadding(m.width)
-	return borderStyle.Copy().Padding(0, pad)
+	padX := uiContainerPadding(m.width)
+	padY := uiContainerPaddingY(m.height)
+	return borderStyle.Copy().Padding(padY, padX)
 }
 
 func (m model) renderInputBox() string {
@@ -242,13 +254,37 @@ func (m model) renderDashboard() string {
 		mutedStyle.Render("status: "+m.status),
 	)
 
-	// Combine left and right with padding
-	content := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().PaddingRight(4).Render(leftStr),
-		rightStr,
-	)
+	cardWidth := m.transcriptBoxWidth()
+	gap := uiDashboardColumnGap(cardWidth)
+	minRight := 10
+	maxLeftWidth := cardWidth - gap - minRight
+	if maxLeftWidth < 10 {
+		stacked := lipgloss.JoinVertical(lipgloss.Left, leftStr, "", rightStr)
+		return borderStyle.Copy().Width(cardWidth).Render(stacked)
+	}
+	leftLines := strings.Split(leftStr, "\n")
+	maxLeft := 0
+	for _, line := range leftLines {
+		if w := lipgloss.Width(line); w > maxLeft {
+			maxLeft = w
+		}
+	}
+	minLeft := maxInt(10, cardWidth/3)
+	if minLeft > maxLeftWidth {
+		minLeft = maxLeftWidth
+	}
+	leftWidth := clampInt(maxLeft, minLeft, maxLeftWidth)
+	rightWidth := maxInt(minRight, cardWidth-leftWidth-gap)
 
-	return borderStyle.Copy().Width(m.transcriptContentWidth()).Render(content)
+	leftBlock := lipgloss.NewStyle().Width(leftWidth).Render(leftStr)
+	gapBlock := ""
+	if gap > 0 {
+		gapBlock = strings.Repeat(" ", gap)
+	}
+	rightBlock := lipgloss.NewStyle().Width(rightWidth).Render(rightStr)
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top, leftBlock, gapBlock, rightBlock)
+	return borderStyle.Copy().Width(cardWidth).Render(content)
 }
 
 func (m model) renderDetailRow(label, value string, labelWidth int) string {

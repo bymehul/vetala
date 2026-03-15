@@ -229,7 +229,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		m.width = msg.Width - 2 // leave a small margin for terminal scrollbars
+		m.width = msg.Width
 		m.height = msg.Height
 		m.updateInputWidths()
 		m.transcriptDirty = true

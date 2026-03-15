@@ -10,6 +10,9 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	t.Setenv("VETALA_UI_MAX_ENTRIES", "123")
 	t.Setenv("VETALA_UI_LIVE_PREVIEW_CHARS", "456")
 	t.Setenv("VETALA_UI_TOOL_DETAILS", "true")
+	t.Setenv("VETALA_UI_CONTAINER_GUTTER", "3")
+	t.Setenv("VETALA_UI_CONTAINER_PADDING_Y", "2")
+	t.Setenv("VETALA_UI_DASHBOARD_COLUMN_GAP", "5")
 
 	if got := uiMaxEntries(10); got != 123 {
 		t.Fatalf("expected uiMaxEntries to honor env override, got %d", got)
@@ -19,6 +22,15 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	}
 	if got := uiToolDetailsDefault(); !got {
 		t.Fatal("expected uiToolDetailsDefault to honor env override")
+	}
+	if got := uiContainerGutter(120); got != 3 {
+		t.Fatalf("expected uiContainerGutter to honor env override, got %d", got)
+	}
+	if got := uiContainerPaddingY(40); got != 2 {
+		t.Fatalf("expected uiContainerPaddingY to honor env override, got %d", got)
+	}
+	if got := uiDashboardColumnGap(120); got != 5 {
+		t.Fatalf("expected uiDashboardColumnGap to honor env override, got %d", got)
 	}
 }
 
