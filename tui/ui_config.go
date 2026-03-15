@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -170,10 +171,10 @@ func uiHints() []string {
 			return hints
 		}
 	}
+	toolKey := formatKeyForHint(firstKey(uiToolToggleKeys(), "ctrl+t"))
 	return []string{
-		"Hints: Ctrl+T toggles tool details.",
-		"Copy: Ctrl+Shift+C copies the last reply.",
-		"PgUp/PgDn scroll · /help shows commands · /model switches models.",
+		fmt.Sprintf("Hints: %s toggles tool details.", toolKey),
+		"Commands: /help shows commands · /model switches models.",
 		"Selection: use Shift+drag if mouse capture is on.",
 	}
 }
@@ -193,7 +194,44 @@ func uiCopyLastKeys() []string {
 			return keys
 		}
 	}
-	return []string{"ctrl+shift+c"}
+	return []string{"ctrl+y"}
+}
+
+func firstKey(keys []string, fallback string) string {
+	for _, k := range keys {
+		if strings.TrimSpace(k) != "" {
+			return k
+		}
+	}
+	return fallback
+}
+
+func formatKeyForHint(key string) string {
+	if key == "" {
+		return key
+	}
+	parts := strings.Split(key, "+")
+	for i, part := range parts {
+		switch strings.ToLower(part) {
+		case "ctrl", "control":
+			parts[i] = "Ctrl"
+		case "alt":
+			parts[i] = "Alt"
+		case "shift":
+			parts[i] = "Shift"
+		case "pgup", "pageup":
+			parts[i] = "PgUp"
+		case "pgdown", "pagedown":
+			parts[i] = "PgDn"
+		default:
+			if len(part) == 1 {
+				parts[i] = strings.ToUpper(part)
+			} else {
+				parts[i] = part
+			}
+		}
+	}
+	return strings.Join(parts, "+")
 }
 
 func uiToolResultMaxLinesCompact(height int) int {
@@ -244,6 +282,16 @@ func uiSelectVisibleRows(height int) int {
 		height = 24
 	}
 	return clampInt(height/2, 4, maxInt(6, height-6))
+}
+
+func uiSelectOptionMaxLines(height int) int {
+	if value, ok := envInt("VETALA_UI_SELECT_OPTION_LINES"); ok && value > 0 {
+		return value
+	}
+	if height <= 0 {
+		height = 24
+	}
+	return clampInt(height/20, 1, 3)
 }
 
 func uiContainerGutter(width int) int {

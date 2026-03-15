@@ -135,7 +135,12 @@ async function main(): Promise<void> {
         return trimmed.length > 16 ? trimmed.slice(0, 16) : trimmed;
     };
 
-    const truncatePreview = (value: string, maxChars = 72): string => {
+    const truncatePreview = (value: string): string => {
+        const rawLimit = process.env.VETALA_UI_RESUME_PREVIEW_CHARS;
+        const maxChars = rawLimit ? Number(rawLimit) : 0;
+        if (!Number.isFinite(maxChars) || maxChars <= 0) {
+            return value;
+        }
         if (value.length <= maxChars) {
             return value;
         }

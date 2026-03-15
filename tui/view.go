@@ -599,7 +599,8 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 				}
 				block := style.Render(label) + "\n" + text
 				if isLastAssistant {
-					block += "\n" + mutedStyle.Render("⧉ copy last reply")
+					copyKey := formatKeyForHint(firstKey(m.copyLastKeys, "ctrl+y"))
+					block += "\n" + mutedStyle.Render(fmt.Sprintf("⧉ %s copy last reply", copyKey))
 				}
 				cardContent = append(cardContent, block)
 				continue
@@ -709,10 +710,11 @@ func (m *model) renderModal() string {
 	}
 
 	cursor := func(idx int, text string) string {
+		prefix := "  "
 		if selected == idx {
-			return accentStyle.Render("❯ " + text)
+			prefix = accentStyle.Render("❯ ")
 		}
-		return "  " + text
+		return prefixLines(text, prefix, strings.Repeat(" ", lipgloss.Width(prefix)))
 	}
 
 	switch m.modalState {
@@ -767,9 +769,15 @@ func (m *model) renderModal() string {
 		)
 	case ModalSelect:
 		var items []string
+		wrapWidth := m.modalContentWidth()
 		items = append(items, accentStyle.Render(m.promptSelectTitle), "")
 		total := len(m.promptSelectOptions)
-		visible := m.visibleSelectRows()
+		maxLines := uiSelectOptionMaxLines(m.height)
+		if maxLines < 1 {
+			maxLines = 1
+		}
+		linesBudget := m.visibleSelectRows()
+		visible := maxInt(1, linesBudget/maxLines)
 		if visible < 1 {
 			visible = 1
 		}
@@ -812,7 +820,10 @@ func (m *model) renderModal() string {
 			}
 		}
 		for i := start; i < end; i++ {
-			items = append(items, cursor(i, fmt.Sprintf("%d. %s", i+1, m.promptSelectOptions[i])))
+			option := fmt.Sprintf("%d. %s", i+1, m.promptSelectOptions[i])
+			optionText := wrapText(option, maxInt(1, wrapWidth-2))
+			optionText = truncateLinesCompact(optionText, maxLines)
+			items = append(items, cursor(i, optionText))
 		}
 		if end < total {
 			items = append(items, mutedStyle.Render("… more (↓)"))
@@ -920,6 +931,24 @@ func truncateLines(text string, maxLines int) string {
 		hidden := len(lines) - maxLines
 		lines = lines[:maxLines]
 		lines = append(lines, fmt.Sprintf("... (%d more lines truncated)", hidden))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func truncateLinesCompact(text string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) <= maxLines {
+		return text
+	}
+	lines = lines[:maxLines]
+	last := strings.TrimRight(lines[maxLines-1], " ")
+	if last == "" {
+		lines[maxLines-1] = "…"
+	} else {
+		lines[maxLines-1] = last + "…"
 	}
 	return strings.Join(lines, "\n")
 }

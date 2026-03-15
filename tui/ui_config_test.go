@@ -17,6 +17,7 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	t.Setenv("VETALA_UI_CONTAINER_PADDING_Y", "2")
 	t.Setenv("VETALA_UI_DASHBOARD_COLUMN_GAP", "5")
 	t.Setenv("VETALA_UI_DASHBOARD_MIN_COL_WIDTH", "9")
+	t.Setenv("VETALA_UI_SELECT_OPTION_LINES", "2")
 	t.Setenv("VETALA_UI_INPUT_PADDING", "2")
 	t.Setenv("VETALA_UI_INPUT_MIN_ROWS", "3")
 	t.Setenv("VETALA_UI_INPUT_MAX_ROWS", "9")
@@ -52,6 +53,9 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	}
 	if got := uiDashboardMinColumnWidth(120); got != 9 {
 		t.Fatalf("expected uiDashboardMinColumnWidth to honor env override, got %d", got)
+	}
+	if got := uiSelectOptionMaxLines(40); got != 2 {
+		t.Fatalf("expected uiSelectOptionMaxLines to honor env override, got %d", got)
 	}
 	if got := uiInputPaddingX(120); got != 2 {
 		t.Fatalf("expected uiInputPaddingX to honor env override, got %d", got)
