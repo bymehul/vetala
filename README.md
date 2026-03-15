@@ -29,12 +29,15 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ### v0.5.3
 Added:
-- Viewport-backed transcript with in-app scrollback (PgUp/PgDn + mouse wheel).
-- Global tool details toggle (Ctrl+T) and env-tunable UI/search limits.
+- UI refresh: left-aligned layout with minimal framing.
+- Viewport-backed transcript with in-app scrollback (PgUp/PgDn + mouse wheel in-app mode).
+- Dynamic input bar with background styling and auto-resize.
+- UI hints + tool details toggle (Ctrl+T) plus env-tunable UI controls (mouse mode, alt screen, limits).
 
 Patched:
 - Buffered output while modals are open to prevent UI jumps.
-- Streaming now sends a final assistant entry; live preview is capped to avoid duplication.
+- Live preview rendering is capped and separated from the transcript during streaming.
+- Cached Glamour renderer per theme/width to cut render cost.
 - Fast search skips binaries/oversized files and handles long lines safely.
 
 ### v0.5.2

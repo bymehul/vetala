@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestUiConfigEnvOverrides(t *testing.T) {
@@ -11,8 +13,20 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	t.Setenv("VETALA_UI_LIVE_PREVIEW_CHARS", "456")
 	t.Setenv("VETALA_UI_TOOL_DETAILS", "true")
 	t.Setenv("VETALA_UI_CONTAINER_GUTTER", "3")
+	t.Setenv("VETALA_UI_CONTAINER_PADDING", "4")
 	t.Setenv("VETALA_UI_CONTAINER_PADDING_Y", "2")
 	t.Setenv("VETALA_UI_DASHBOARD_COLUMN_GAP", "5")
+	t.Setenv("VETALA_UI_DASHBOARD_MIN_COL_WIDTH", "9")
+	t.Setenv("VETALA_UI_INPUT_PADDING", "2")
+	t.Setenv("VETALA_UI_INPUT_MIN_ROWS", "3")
+	t.Setenv("VETALA_UI_INPUT_MAX_ROWS", "9")
+	t.Setenv("VETALA_UI_INPUT_BG_DARK", "234")
+	t.Setenv("VETALA_UI_INPUT_BG_LIGHT", "250")
+	t.Setenv("VETALA_UI_TOGGLE_TOOL_KEYS", "alt+t,ctrl+shift+t")
+	t.Setenv("VETALA_UI_KEY_DEBUG", "true")
+	t.Setenv("VETALA_UI_MOUSE_MODE", "cell")
+	t.Setenv("VETALA_UI_ALT_SCREEN", "false")
+	t.Setenv("VETALA_UI_HINTS", "Hint one|Hint two")
 
 	if got := uiMaxEntries(10); got != 123 {
 		t.Fatalf("expected uiMaxEntries to honor env override, got %d", got)
@@ -26,11 +40,47 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	if got := uiContainerGutter(120); got != 3 {
 		t.Fatalf("expected uiContainerGutter to honor env override, got %d", got)
 	}
+	if got := uiContainerPadding(120); got != 4 {
+		t.Fatalf("expected uiContainerPadding to honor env override, got %d", got)
+	}
 	if got := uiContainerPaddingY(40); got != 2 {
 		t.Fatalf("expected uiContainerPaddingY to honor env override, got %d", got)
 	}
 	if got := uiDashboardColumnGap(120); got != 5 {
 		t.Fatalf("expected uiDashboardColumnGap to honor env override, got %d", got)
+	}
+	if got := uiDashboardMinColumnWidth(120); got != 9 {
+		t.Fatalf("expected uiDashboardMinColumnWidth to honor env override, got %d", got)
+	}
+	if got := uiInputPaddingX(120); got != 2 {
+		t.Fatalf("expected uiInputPaddingX to honor env override, got %d", got)
+	}
+	if got := uiInputMinRows(40); got != 3 {
+		t.Fatalf("expected uiInputMinRows to honor env override, got %d", got)
+	}
+	if got := uiInputMaxRows(40); got != 9 {
+		t.Fatalf("expected uiInputMaxRows to honor env override, got %d", got)
+	}
+	if got := uiInputBackground(true); got != "234" {
+		t.Fatalf("expected uiInputBackground(true) to honor env override, got %s", got)
+	}
+	if got := uiInputBackground(false); got != "250" {
+		t.Fatalf("expected uiInputBackground(false) to honor env override, got %s", got)
+	}
+	if got := uiToolToggleKeys(); len(got) != 2 || got[0] != "alt+t" || got[1] != "ctrl+shift+t" {
+		t.Fatalf("expected uiToolToggleKeys to honor env override, got %v", got)
+	}
+	if got := uiKeyDebugEnabled(); !got {
+		t.Fatal("expected uiKeyDebugEnabled to honor env override")
+	}
+	if got := uiMouseMode(); got != tea.MouseModeCellMotion {
+		t.Fatalf("expected uiMouseMode to honor env override, got %v", got)
+	}
+	if got := uiAltScreen(); got {
+		t.Fatal("expected uiAltScreen to honor env override")
+	}
+	if got := uiHints(); len(got) != 2 || got[0] != "Hint one" || got[1] != "Hint two" {
+		t.Fatalf("expected uiHints to honor env override, got %v", got)
 	}
 }
 

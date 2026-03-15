@@ -4,6 +4,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // UI and search tuning knobs. All defaults can be overridden via env vars.
@@ -34,6 +36,14 @@ func envBool(name string) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+func envString(name string) (string, bool) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return "", false
+	}
+	return value, true
 }
 
 func maxInt(a, b int) int {
@@ -90,6 +100,81 @@ func uiToolDetailsDefault() bool {
 		return value
 	}
 	return false
+}
+
+func uiMouseMode() tea.MouseMode {
+	if value, ok := envString("VETALA_UI_MOUSE_MODE"); ok {
+		switch strings.ToLower(value) {
+		case "none", "off", "false", "0":
+			return tea.MouseModeNone
+		case "cell", "cellmotion", "cell_motion":
+			return tea.MouseModeCellMotion
+		case "all", "allmotion", "all_motion":
+			return tea.MouseModeAllMotion
+		}
+	}
+	// Default to no mouse capture so terminal selection/scrollback work.
+	// Set VETALA_UI_MOUSE_MODE=cell to enable in-app mouse wheel scrolling.
+	return tea.MouseModeNone
+}
+
+func uiAltScreen() bool {
+	if value, ok := envBool("VETALA_UI_ALT_SCREEN"); ok {
+		return value
+	}
+	// Default to alt screen for reliable in-app scrolling.
+	return true
+}
+
+func uiKeyDebugEnabled() bool {
+	if value, ok := envBool("VETALA_UI_KEY_DEBUG"); ok {
+		return value
+	}
+	return false
+}
+
+func uiToolToggleKeys() []string {
+	if value, ok := envString("VETALA_UI_TOGGLE_TOOL_KEYS"); ok {
+		fields := strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == ';' || r == '\t' || r == '\n'
+		})
+		var keys []string
+		for _, f := range fields {
+			if f != "" {
+				keys = append(keys, f)
+			}
+		}
+		if len(keys) > 0 {
+			return keys
+		}
+	}
+	return []string{"ctrl+t", "ctrl+shift+t"}
+}
+
+func uiHints() []string {
+	if value, ok := envString("VETALA_UI_HINTS"); ok {
+		v := strings.TrimSpace(strings.ToLower(value))
+		if v == "off" || v == "none" || v == "false" || v == "0" {
+			return nil
+		}
+		fields := strings.FieldsFunc(value, func(r rune) bool {
+			return r == '|' || r == '\n'
+		})
+		var hints []string
+		for _, f := range fields {
+			if trimmed := strings.TrimSpace(f); trimmed != "" {
+				hints = append(hints, trimmed)
+			}
+		}
+		if len(hints) > 0 {
+			return hints
+		}
+	}
+	return []string{
+		"Hints: Ctrl+T toggles tool details.",
+		"PgUp/PgDn scroll · /help shows commands · /model switches models.",
+		"Selection: use Shift+drag if mouse capture is on.",
+	}
 }
 
 func uiToolResultMaxLinesCompact(height int) int {
@@ -149,8 +234,8 @@ func uiContainerGutter(width int) int {
 	if width <= 0 {
 		width = 80
 	}
-	// Keep a small right gutter so borders don't collide with terminal scrollbars.
-	return clampInt(width/40, 1, 2)
+	// Default to no gutter so content is left-aligned and fills the terminal.
+	return 0
 }
 
 func uiContainerPadding(width int) int {
@@ -160,8 +245,8 @@ func uiContainerPadding(width int) int {
 	if width <= 0 {
 		width = 80
 	}
-	// Scale lightly with terminal width; keep small by default.
-	return clampInt(width/120, 1, 2)
+	// Default to no horizontal padding; keep everything left-aligned.
+	return 0
 }
 
 func uiContainerPaddingY(height int) int {
@@ -175,6 +260,54 @@ func uiContainerPaddingY(height int) int {
 	return clampInt(height/40, 1, 2)
 }
 
+func uiInputPaddingX(width int) int {
+	if value, ok := envInt("VETALA_UI_INPUT_PADDING"); ok && value >= 0 {
+		return value
+	}
+	if width <= 0 {
+		width = 80
+	}
+	// Keep a small, consistent inset inside the input bar.
+	return clampInt(width/120, 1, 2)
+}
+
+func uiInputMinRows(height int) int {
+	if value, ok := envInt("VETALA_UI_INPUT_MIN_ROWS"); ok && value > 0 {
+		return value
+	}
+	if height <= 0 {
+		height = 24
+	}
+	// Keep at least a single row; allow a second row on taller terminals.
+	return clampInt(height/24, 1, 2)
+}
+
+func uiInputMaxRows(height int) int {
+	if value, ok := envInt("VETALA_UI_INPUT_MAX_ROWS"); ok && value > 0 {
+		return value
+	}
+	if height <= 0 {
+		height = 24
+	}
+	// Limit input growth to a fraction of the terminal height.
+	return clampInt(height/3, 2, maxInt(6, height/2))
+}
+
+func uiInputBackground(dark bool) string {
+	if dark {
+		if value, ok := envString("VETALA_UI_INPUT_BG_DARK"); ok {
+			return value
+		}
+		// Subtle dark background.
+		return "236"
+	}
+	if value, ok := envString("VETALA_UI_INPUT_BG_LIGHT"); ok {
+		return value
+	}
+	// Subtle light background.
+	return "255"
+}
+
 func uiDashboardColumnGap(width int) int {
 	if value, ok := envInt("VETALA_UI_DASHBOARD_COLUMN_GAP"); ok && value >= 0 {
 		return value
@@ -183,6 +316,16 @@ func uiDashboardColumnGap(width int) int {
 		width = 80
 	}
 	return clampInt(width/20, 2, 6)
+}
+
+func uiDashboardMinColumnWidth(width int) int {
+	if value, ok := envInt("VETALA_UI_DASHBOARD_MIN_COL_WIDTH"); ok && value > 0 {
+		return value
+	}
+	if width <= 0 {
+		width = 80
+	}
+	return clampInt(width/6, 10, 24)
 }
 
 func fastSearchMaxFileBytes() int64 {

@@ -4,11 +4,12 @@ import (
 	"io"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 type ModalState int
@@ -46,23 +47,39 @@ type model struct {
 	trusted   bool
 
 	// Components
-	viewport  viewport.Model
-	textInput textinput.Model
-	spinner   spinner.Model
+	viewport viewport.Model
+	textArea textarea.Model
+	spinner  spinner.Model
 
 	// Transcript
-	entries          []EntryData
-	liveBuffer       string
-	activity         *string
-	autoScroll       bool
-	transcriptDirty  bool
-	pendingUpdates   []deferredUpdate
-	showToolDetails  bool
-	showDashboard    bool
-	glamourRenderer  markdownRenderer
-	glamourWidth     int
-	glamourDarkTheme bool
-	lastLiveEntry    bool
+	entries            []EntryData
+	liveBuffer         string
+	activity           *string
+	autoScroll         bool
+	transcriptDirty    bool
+	pendingUpdates     []deferredUpdate
+	showToolDetails    bool
+	showDashboard      bool
+	hasDarkBackground  bool
+	bgKnown            bool
+	entriesDirty       bool
+	dashboardDirty     bool
+	entriesWidth       int
+	entriesHeight      int
+	entriesToolDetails bool
+	dashboardWidth     int
+	renderedEntries    string
+	renderedDashboard  string
+	glamourRenderer    markdownRenderer
+	glamourWidth       int
+	glamourDarkTheme   bool
+	lastLiveEntry      bool
+
+	toggleToolKeys []string
+	keyDebug       bool
+	lastKeyDebug   string
+	mouseMode      tea.MouseMode
+	altScreen      bool
 
 	// Modals
 	modalState     ModalState
@@ -96,39 +113,59 @@ func resetModalClosedCmd() tea.Cmd {
 }
 
 func initialModel(w io.Writer) *model {
-	ti := textinput.New()
-	ti.Placeholder = "Ask Vetala..."
-	ti.Focus()
-	ti.CharLimit = 2048
-	ti.Width = 100
+	ta := textarea.New()
+	ta.Prompt = ""
+	ta.Placeholder = "Ask Vetala..."
+	ta.ShowLineNumbers = false
+	ta.Focus()
+	ta.CharLimit = 2048
+	ta.SetWidth(100)
+	ta.SetHeight(1)
+	ta.SetVirtualCursor(true)
+	ta.KeyMap.InsertNewline.SetEnabled(false)
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("39")) // accent blue
 
-	vp := viewport.New(100, 20)
+	vp := viewport.New(
+		viewport.WithWidth(100),
+		viewport.WithHeight(20),
+	)
 	vp.YPosition = 0
 	vp.MouseWheelEnabled = true
 
 	mi := textinput.New()
+	mi.Prompt = ""
 	mi.Focus()
-	mi.Width = 60
+	mi.SetWidth(60)
+	mi.SetVirtualCursor(true)
 
 	return &model{
-		textInput:       ti,
-		spinner:         sp,
-		viewport:        vp,
-		modalInput:      mi,
-		status:          "Connecting...",
-		backendWriter:   w,
-		autoScroll:      true,
-		transcriptDirty: true,
-		showToolDetails: uiToolDetailsDefault(),
+		textArea:           ta,
+		spinner:            sp,
+		viewport:           vp,
+		modalInput:         mi,
+		status:             "Connecting...",
+		backendWriter:      w,
+		autoScroll:         true,
+		transcriptDirty:    true,
+		entriesDirty:       true,
+		dashboardDirty:     true,
+		showToolDetails:    uiToolDetailsDefault(),
+		entriesToolDetails: uiToolDetailsDefault(),
+		toggleToolKeys:     uiToolToggleKeys(),
+		keyDebug:           uiKeyDebugEnabled(),
+		mouseMode:          uiMouseMode(),
+		altScreen:          uiAltScreen(),
 	}
 }
 
 func (m *model) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(
+		textarea.Blink,
+		func() tea.Msg { return tea.RequestBackgroundColor() },
+	)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -138,38 +175,48 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
+		key := msg.String()
+		keystroke := msg.Keystroke()
+		if m.keyDebug {
+			m.lastKeyDebug = "key: " + key
+			if keystroke != "" && keystroke != key {
+				m.lastKeyDebug += " · stroke: " + keystroke
+			}
+		}
 		// Handle global keys first
-		switch msg.Type {
-		case tea.KeyCtrlC:
+		switch key {
+		case "ctrl+c":
 			// If running, send interrupt to pause the agent and trigger refinement prompt.
 			// Otherwise, clear the current input to avoid accidental exits. Use Ctrl+D to exit.
 			if m.running {
 				sendInterrupt(m.backendWriter)
 			} else {
-				m.textInput.SetValue("")
+				m.textArea.SetValue("")
 			}
 			return m, nil
-		case tea.KeyCtrlD:
+		case "ctrl+d":
 			m.modalState = ModalExit
 			return m, nil
-		case tea.KeyCtrlT:
+		}
+		if m.isToggleToolKey(key) || (keystroke != key && m.isToggleToolKey(keystroke)) {
 			m.showToolDetails = !m.showToolDetails
+			m.entriesDirty = true
 			m.transcriptDirty = true
 			return m, nil
 		}
 
-		if m.handleScrollKey(msg) {
+		if m.handleScrollKey(key) {
 			return m, nil
 		}
 
 		// Handle active modal input
 		if m.modalState != ModalNone {
 			if m.modalState == ModalInput {
-				switch msg.Type {
-				case tea.KeyEnter:
+				switch key {
+				case "enter":
 					return m.triggerActiveModal()
-				case tea.KeyEsc, tea.KeyCtrlC:
+				case "esc", "ctrl+c":
 					// Treat as submitting empty string to cancel
 					sendSubmitInput(m.backendWriter, m.promptInputId, "")
 					m.modalState = ModalNone
@@ -180,19 +227,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.modalInput, cmd = m.modalInput.Update(msg)
 				return m, cmd
 			}
-			return m.handleModalKey(msg)
+			return m.handleModalKey(key)
 		}
 
 		// Handle main input
-		switch msg.Type {
-		case tea.KeyEnter:
-			v := strings.TrimSpace(m.textInput.Value())
+		switch key {
+		case "enter":
+			v := strings.TrimSpace(m.textArea.Value())
 			if v != "" {
 				m.entries = append(m.entries, EntryData{Kind: "user", Text: v})
 				m.trimEntries()
 				m.transcriptDirty = true
 				m.autoScroll = true
-				m.textInput.SetValue("")
+				m.textArea.SetValue("")
 
 				isCommand := strings.HasPrefix(v, "/")
 				if !isCommand {
@@ -204,21 +251,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, nil
-		case tea.KeyTab:
+		case "tab":
 			// Autocomplete first slash suggestion
-			v := m.textInput.Value()
+			v := m.textArea.Value()
 			if strings.HasPrefix(v, "/") {
 				matches := matchSlashCommands(v)
 				if len(matches) > 0 {
-					m.textInput.SetValue(matches[0].completion)
-					m.textInput.SetCursor(len(matches[0].completion))
+					m.textArea.SetValue(matches[0].completion)
+					m.textArea.MoveToEnd()
 				}
 			}
 			return m, nil
 		}
 
 		// Forward to text input
-		m.textInput, cmd = m.textInput.Update(msg)
+		m.textArea, cmd = m.textArea.Update(msg)
 		cmds = append(cmds, cmd)
 
 	case tea.MouseMsg:
@@ -232,6 +279,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.updateInputWidths()
+		m.entriesDirty = true
+		m.dashboardDirty = true
+		m.transcriptDirty = true
+		return m, nil
+
+	case tea.BackgroundColorMsg:
+		m.hasDarkBackground = msg.IsDark()
+		m.bgKnown = true
+		m.entriesDirty = true
+		m.dashboardDirty = true
 		m.transcriptDirty = true
 		return m, nil
 
@@ -241,6 +298,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 		m.status = "Ready"
 		m.showDashboard = true
+		m.dashboardDirty = true
 		// Only show trust prompt and dashboard on first ready, not on /model re-sends
 		if !m.trusted {
 			m.modalState = ModalTrust
@@ -278,7 +336,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			lbl := string(msg)
 			m.activity = &lbl
 		}
-		m.transcriptDirty = true
 
 	case MsgSpinner:
 		if msg.Label != nil {
@@ -287,10 +344,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Spinner stopped — clear activity
 			m.activity = nil
 		}
-		m.transcriptDirty = true
 
 	case MsgStatus:
 		m.status = string(msg)
+		m.dashboardDirty = true
 		// Reset running state for everything except explicit agent activity statuses
 		if m.status != "Running agent" && m.status != "Stopping current turn" && m.status != "Running queued prompt" {
 			m.running = false
@@ -330,6 +387,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.entries = nil
 		m.liveBuffer = ""
 		m.activity = nil
+		m.entriesDirty = true
 		m.transcriptDirty = true
 		m.autoScroll = true
 		m.viewport.SetContent("")
@@ -342,6 +400,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+
+	case tea.PasteMsg:
+		if m.modalState == ModalInput {
+			m.modalInput, cmd = m.modalInput.Update(msg)
+			return m, cmd
+		}
+		if m.modalState == ModalNone {
+			m.textArea, cmd = m.textArea.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+
+	default:
+		if m.modalState == ModalInput {
+			m.modalInput, cmd = m.modalInput.Update(msg)
+			return m, cmd
+		}
+		if m.modalState == ModalNone {
+			m.textArea, cmd = m.textArea.Update(msg)
+			return m, cmd
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -351,7 +430,16 @@ func (m *model) visibleSelectRows() int {
 	return uiSelectVisibleRows(m.height)
 }
 
-func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *model) isToggleToolKey(key string) bool {
+	for _, k := range m.toggleToolKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) handleModalKey(key string) (tea.Model, tea.Cmd) {
 	if m.modalState == ModalSelect && m.modalSelectReset {
 		m.modalSelectReset = false
 	}
@@ -372,7 +460,7 @@ func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Global up/down handling for modal selection
-	if msg.Type == tea.KeyUp || msg.String() == "k" || msg.String() == "up" {
+	if key == "up" || key == "k" {
 		m.modalSelection--
 		if m.modalSelection < 0 {
 			m.modalSelection = 0 // we will calculate max below
@@ -382,7 +470,7 @@ func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if msg.Type == tea.KeyDown || msg.String() == "j" || msg.String() == "down" {
+	if key == "down" || key == "j" {
 		m.modalSelection++
 		if m.modalSelection > maxSel {
 			m.modalSelection = maxSel
@@ -403,7 +491,7 @@ func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modalSelection = 1
 		}
 
-		switch msg.String() {
+		switch key {
 		case "1":
 			m.modalSelection = 0
 			// fallthrough in Go needs explicit call or logic, let's just trigger
@@ -419,7 +507,7 @@ func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modalSelection = 2
 		}
 
-		switch msg.String() {
+		switch key {
 		case "1":
 			m.modalSelection = 0
 			return m.triggerActiveModal()
@@ -437,7 +525,7 @@ func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modalSelection = 1
 		}
 
-		switch msg.String() {
+		switch key {
 		case "1":
 			m.modalSelection = 0
 			return m.triggerActiveModal()
@@ -453,7 +541,7 @@ func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modalSelection = maxSel
 		}
 
-		switch msg.String() {
+		switch key {
 		case "enter":
 			return m.triggerActiveModal()
 		}
@@ -517,15 +605,15 @@ func (m *model) triggerActiveModal() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) handleScrollKey(msg tea.KeyMsg) bool {
-	switch msg.Type {
-	case tea.KeyPgUp:
-		m.viewport.ViewUp()
-	case tea.KeyPgDown:
-		m.viewport.ViewDown()
-	case tea.KeyHome:
+func (m *model) handleScrollKey(key string) bool {
+	switch key {
+	case "pgup", "pageup":
+		m.viewport.PageUp()
+	case "pgdown", "pagedown":
+		m.viewport.PageDown()
+	case "home":
 		m.viewport.GotoTop()
-	case tea.KeyEnd:
+	case "end":
 		m.viewport.GotoBottom()
 	default:
 		return false
@@ -538,13 +626,16 @@ func (m *model) updateInputWidths() {
 	if m.width <= 0 {
 		return
 	}
-	frameW, _ := borderStyle.GetFrameSize()
 	prefixWidth := lipgloss.Width("❯ ")
-	textWidth := maxInt(10, m.transcriptBoxWidth()-frameW-prefixWidth-2)
-	m.textInput.Width = textWidth
+	padX := uiContainerPadding(m.width)
+	innerWidth := maxInt(10, m.transcriptBoxWidth()-(padX*2))
+	inputPad := uiInputPaddingX(m.width)
+	textWidth := maxInt(10, innerWidth-(inputPad*2)-prefixWidth)
+	m.textArea.SetWidth(textWidth)
+	m.textArea.MaxHeight = uiInputMaxRows(m.height)
 
 	modalWidth := maxInt(10, m.modalContentWidth())
-	m.modalInput.Width = modalWidth
+	m.modalInput.SetWidth(modalWidth)
 }
 
 func (m *model) trimEntries() {
@@ -566,6 +657,7 @@ func (m *model) appendEntry(entry EntryData) {
 		if last.Kind == "assistant" {
 			m.entries[lastIdx] = entry
 			m.lastLiveEntry = false
+			m.entriesDirty = true
 			m.transcriptDirty = true
 			return
 		}
@@ -577,6 +669,7 @@ func (m *model) appendEntry(entry EntryData) {
 	}
 	m.entries = append(m.entries, entry)
 	m.trimEntries()
+	m.entriesDirty = true
 	m.transcriptDirty = true
 }
 
@@ -589,7 +682,6 @@ func (m *model) appendLiveChunk(chunk string) {
 	if maxChars > 0 && len(m.liveBuffer) > maxChars {
 		m.liveBuffer = m.liveBuffer[len(m.liveBuffer)-maxChars:]
 	}
-	m.transcriptDirty = true
 }
 
 func (m *model) flushLiveBuffer() {
@@ -600,6 +692,7 @@ func (m *model) flushLiveBuffer() {
 	m.trimEntries()
 	m.liveBuffer = ""
 	m.lastLiveEntry = true
+	m.entriesDirty = true
 	m.transcriptDirty = true
 }
 

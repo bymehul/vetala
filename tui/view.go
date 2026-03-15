@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"strings"
 
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
 )
 
 // Styles
@@ -35,22 +38,21 @@ var (
 	kindActivityStyle  = mutedStyle.Copy()
 )
 
-func (m *model) View() string {
+func (m *model) View() tea.View {
 	if !m.ready {
-		return lipgloss.Place(m.width, 2, lipgloss.Center, lipgloss.Center, "Connecting to backend...")
+		v := tea.NewView(lipgloss.Place(m.width, 2, lipgloss.Center, lipgloss.Center, "Connecting to backend..."))
+		v.MouseMode = m.mouseMode
+		return v
 	}
 
 	inputBox := m.renderInputBox()
+	hintsStr := m.renderHints()
 	footerStr := m.renderFooter()
-	var dashboardStr string
-	if m.showDashboard {
-		dashboardStr = m.renderDashboard()
-	}
 
 	var midSection string
 	var slashBox string
 	if m.modalState == ModalNone && !m.running {
-		v := m.textInput.Value()
+		v := m.textArea.Value()
 		if strings.HasPrefix(v, "/") {
 			matches := matchSlashCommands(v)
 			if len(matches) > 0 {
@@ -60,7 +62,11 @@ func (m *model) View() string {
 	}
 
 	contentWidth := m.transcriptBoxWidth()
-	contentHeight := m.availableTranscriptHeight(inputBox, slashBox, footerStr, dashboardStr)
+	liveSection := ""
+	if m.modalState == ModalNone {
+		liveSection = m.renderLiveSection(contentWidth)
+	}
+	contentHeight := m.availableTranscriptHeight(inputBox, slashBox, footerStr, liveSection, hintsStr)
 	m.updateViewportLayout(contentWidth, contentHeight)
 	m.refreshTranscript()
 
@@ -82,12 +88,16 @@ func (m *model) View() string {
 	}
 
 	parts := []string{}
-	if dashboardStr != "" {
-		parts = append(parts, dashboardStr)
+	parts = append(parts, midSection)
+	if liveSection != "" {
+		parts = append(parts, liveSection)
 	}
-	parts = append(parts, midSection, inputBox)
+	parts = append(parts, inputBox)
 	if slashBox != "" {
 		parts = append(parts, slashBox)
+	}
+	if hintsStr != "" {
+		parts = append(parts, hintsStr)
 	}
 	parts = append(parts, footerStr)
 	viewStr := lipgloss.JoinVertical(
@@ -111,7 +121,10 @@ func (m *model) View() string {
 		}
 	}
 
-	return viewStr
+	v := tea.NewView(viewStr)
+	v.MouseMode = m.mouseMode
+	v.AltScreen = m.altScreen
+	return v
 }
 
 func (m *model) transcriptBoxWidth() int {
@@ -132,14 +145,17 @@ func (m *model) transcriptContentWidth() int {
 	return maxInt(10, m.transcriptBoxWidth()-frameW)
 }
 
-func (m *model) availableTranscriptHeight(inputBox, slashBox, footerStr, dashboardStr string) int {
+func (m *model) availableTranscriptHeight(inputBox, slashBox, footerStr, liveSection, hintsStr string) int {
 	height := m.height
 	if height <= 0 {
 		height = 24
 	}
 	used := lipgloss.Height(inputBox) + lipgloss.Height(footerStr)
-	if dashboardStr != "" {
-		used += lipgloss.Height(dashboardStr)
+	if hintsStr != "" {
+		used += lipgloss.Height(hintsStr)
+	}
+	if liveSection != "" {
+		used += lipgloss.Height(liveSection)
 	}
 	if slashBox != "" {
 		used += lipgloss.Height(slashBox)
@@ -156,9 +172,9 @@ func (m *model) updateViewportLayout(boxWidth, boxHeight int) {
 	contentWidth := maxInt(1, boxWidth-frameW)
 	contentHeight := maxInt(1, boxHeight-frameH)
 
-	if m.viewport.Width != contentWidth || m.viewport.Height != contentHeight {
-		m.viewport.Width = contentWidth
-		m.viewport.Height = contentHeight
+	if m.viewport.Width() != contentWidth || m.viewport.Height() != contentHeight {
+		m.viewport.SetWidth(contentWidth)
+		m.viewport.SetHeight(contentHeight)
 		m.transcriptDirty = true
 	}
 }
@@ -176,49 +192,192 @@ func (m *model) refreshTranscript() {
 }
 
 func (m *model) renderTranscriptContent() string {
-	var parts []string
-	if transcript := m.renderCardsToPrint(m.entries); transcript != "" {
-		parts = append(parts, transcript)
+	innerWidth := m.transcriptContentWidth()
+	separator := mutedStyle.Render(horizontalRule(innerWidth))
+	var b strings.Builder
+
+	appendSection := func(section string) {
+		if section == "" {
+			return
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+			if separator != "" {
+				b.WriteString(separator)
+				b.WriteString("\n\n")
+			} else {
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString(section)
 	}
-	if live := m.renderLiveStatus(); live != "" {
-		parts = append(parts, live)
+
+	if m.showDashboard {
+		if m.dashboardDirty || m.dashboardWidth != innerWidth {
+			m.renderedDashboard = m.renderDashboard(innerWidth)
+			m.dashboardWidth = innerWidth
+			m.dashboardDirty = false
+		}
+		appendSection(m.renderedDashboard)
+	} else if m.renderedDashboard != "" {
+		m.renderedDashboard = ""
 	}
-	return strings.Join(parts, "\n\n")
+
+	if m.entriesDirty || m.entriesWidth != innerWidth || m.entriesHeight != m.height || m.entriesToolDetails != m.showToolDetails {
+		m.renderedEntries = m.renderCardsToPrint(m.entries)
+		m.entriesWidth = innerWidth
+		m.entriesHeight = m.height
+		m.entriesToolDetails = m.showToolDetails
+		m.entriesDirty = false
+	}
+	appendSection(m.renderedEntries)
+
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m *model) transcriptFrameStyle() lipgloss.Style {
 	padX := uiContainerPadding(m.width)
-	padY := uiContainerPaddingY(m.height)
-	return borderStyle.Copy().Padding(padY, padX)
+	return lipgloss.NewStyle().Padding(0, padX)
 }
 
-func (m model) renderInputBox() string {
-	inputStr := accentStyle.Render("❯ ") + m.textInput.View()
-	if m.running {
-		inputStr += mutedStyle.Render("  (agent running)")
+func (m *model) renderInputBox() string {
+	padX := uiContainerPadding(m.width)
+	boxWidth := m.transcriptBoxWidth()
+	innerWidth := maxInt(1, boxWidth-2*padX)
+	rule := mutedStyle.Render(horizontalRule(innerWidth))
+
+	dark := m.hasDarkBackground
+	if !m.bgKnown {
+		dark = true
 	}
-	return borderStyle.Copy().Width(m.transcriptBoxWidth()).Render(inputStr)
+	bgColor := lipgloss.Color(uiInputBackground(dark))
+	bgStyle := lipgloss.NewStyle().Background(bgColor)
+
+	inputPad := uiInputPaddingX(m.width)
+	leftPad := bgStyle.Render(strings.Repeat(" ", inputPad))
+	rightPad := bgStyle.Render(strings.Repeat(" ", inputPad))
+
+	promptRaw := "❯ "
+	promptWidth := lipgloss.Width(promptRaw)
+	textWidth := maxInt(1, innerWidth-(inputPad*2)-promptWidth)
+
+	minRows := uiInputMinRows(m.height)
+	maxRows := uiInputMaxRows(m.height)
+	if maxRows < minRows {
+		maxRows = minRows
+	}
+
+	m.textArea.Prompt = ""
+	m.textArea.ShowLineNumbers = false
+	m.textArea.SetStyles(inputTextAreaStyles(dark, bgColor))
+	m.textArea.SetWidth(textWidth)
+	m.textArea.MaxHeight = maxRows
+
+	desiredRows := clampInt(countWrappedLines(m.textArea.Value(), textWidth), minRows, maxRows)
+	m.textArea.SetHeight(desiredRows)
+
+	ti := m.textArea
+	prompt := bgStyle.Copy().Foreground(accentColor).Bold(true).Render(promptRaw)
+	promptPad := bgStyle.Render(strings.Repeat(" ", promptWidth))
+
+	lines := strings.Split(ti.View(), "\n")
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	inputLines := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if m.running && i == len(lines)-1 {
+			status := bgStyle.Copy().Foreground(mutedColor).Render("  (agent running)")
+			if lipgloss.Width(line)+lipgloss.Width(status) <= textWidth {
+				line += status
+			}
+		}
+		if lineWidth := lipgloss.Width(line); lineWidth < textWidth {
+			line += bgStyle.Render(strings.Repeat(" ", textWidth-lineWidth))
+		}
+		if i == 0 {
+			inputLines = append(inputLines, leftPad+prompt+line+rightPad)
+		} else {
+			inputLines = append(inputLines, leftPad+promptPad+line+rightPad)
+		}
+	}
+
+	content := strings.Join(append([]string{rule}, inputLines...), "\n")
+	return lipgloss.NewStyle().Padding(0, padX).Width(boxWidth).Render(content)
+}
+
+func inputTextAreaStyles(dark bool, bg color.Color) textarea.Styles {
+	styles := textarea.DefaultStyles(dark)
+	base := lipgloss.NewStyle().Background(bg)
+	muted := base.Copy().Foreground(mutedColor)
+	accent := base.Copy().Foreground(accentColor)
+
+	styles.Focused.Base = base.Copy()
+	styles.Focused.Text = base.Copy()
+	styles.Focused.Placeholder = muted
+	styles.Focused.Prompt = accent
+	styles.Focused.LineNumber = muted
+	styles.Focused.CursorLine = base.Copy()
+	styles.Focused.CursorLineNumber = muted
+	styles.Focused.EndOfBuffer = base.Copy()
+
+	styles.Blurred.Base = base.Copy()
+	styles.Blurred.Text = base.Copy().Foreground(mutedColor)
+	styles.Blurred.Placeholder = muted
+	styles.Blurred.Prompt = muted
+	styles.Blurred.LineNumber = muted
+	styles.Blurred.CursorLine = base.Copy()
+	styles.Blurred.CursorLineNumber = muted
+	styles.Blurred.EndOfBuffer = base.Copy()
+
+	styles.Cursor.Color = accentColor
+	return styles
 }
 
 func (m model) renderFooter() string {
-	statusSuffix := " · " + m.status
+	statusLine := "status: " + m.status
 	if m.running {
-		statusSuffix += " · running"
+		statusLine += " · running"
+	}
+	if m.showToolDetails {
+		statusLine += " · tool details: on"
+	} else {
+		statusLine += " · tool details: off"
 	}
 
 	footerLeft := "/help · /undo · PgUp/PgDn scroll · Ctrl+T tool details · Ctrl+C pause · Ctrl+D exit"
-	footerStr := mutedStyle.Render(footerLeft)
-
-	// Pad middle to align right
-	padWidth := m.width - lipgloss.Width(footerLeft) - lipgloss.Width(statusSuffix)
-	if padWidth > 0 {
-		footerStr += strings.Repeat(" ", padWidth)
+	footerStr := lipgloss.JoinVertical(lipgloss.Left,
+		mutedStyle.Render(footerLeft),
+		mutedStyle.Render(statusLine),
+	)
+	if m.keyDebug && m.lastKeyDebug != "" {
+		footerStr = lipgloss.JoinVertical(lipgloss.Left,
+			footerStr,
+			mutedStyle.Render(m.lastKeyDebug),
+		)
 	}
-	footerStr += mutedStyle.Render(statusSuffix)
-	return footerStr
+
+	padX := uiContainerPadding(m.width)
+	return lipgloss.NewStyle().Padding(0, padX).Width(m.transcriptBoxWidth()).Render(footerStr)
 }
 
-func (m model) renderDashboard() string {
+func (m model) renderHints() string {
+	hints := uiHints()
+	if len(hints) == 0 {
+		return ""
+	}
+	padX := uiContainerPadding(m.width)
+	innerWidth := maxInt(1, m.transcriptBoxWidth()-2*padX)
+	lines := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		lines = append(lines, mutedStyle.Copy().Width(innerWidth).Render(hint))
+	}
+	content := strings.Join(lines, "\n")
+	return lipgloss.NewStyle().Padding(0, padX).Width(m.transcriptBoxWidth()).Render(content)
+}
+
+func (m model) renderDashboard(width int) string {
 	labels := []string{"provider", "model", "auth", "directory", "session"}
 	labelWidth := 0
 	for _, label := range labels {
@@ -254,13 +413,14 @@ func (m model) renderDashboard() string {
 		mutedStyle.Render("status: "+m.status),
 	)
 
-	cardWidth := m.transcriptBoxWidth()
-	gap := uiDashboardColumnGap(cardWidth)
-	minRight := 10
-	maxLeftWidth := cardWidth - gap - minRight
-	if maxLeftWidth < 10 {
+	innerWidth := maxInt(10, width)
+
+	gap := uiDashboardColumnGap(innerWidth)
+	minCol := uiDashboardMinColumnWidth(innerWidth)
+	maxLeftWidth := innerWidth - gap - minCol
+	if maxLeftWidth < minCol {
 		stacked := lipgloss.JoinVertical(lipgloss.Left, leftStr, "", rightStr)
-		return borderStyle.Copy().Width(cardWidth).Render(stacked)
+		return stacked
 	}
 	leftLines := strings.Split(leftStr, "\n")
 	maxLeft := 0
@@ -269,12 +429,12 @@ func (m model) renderDashboard() string {
 			maxLeft = w
 		}
 	}
-	minLeft := maxInt(10, cardWidth/3)
+	minLeft := maxInt(minCol, innerWidth/3)
 	if minLeft > maxLeftWidth {
 		minLeft = maxLeftWidth
 	}
 	leftWidth := clampInt(maxLeft, minLeft, maxLeftWidth)
-	rightWidth := maxInt(minRight, cardWidth-leftWidth-gap)
+	rightWidth := maxInt(minCol, innerWidth-leftWidth-gap)
 
 	leftBlock := lipgloss.NewStyle().Width(leftWidth).Render(leftStr)
 	gapBlock := ""
@@ -284,7 +444,7 @@ func (m model) renderDashboard() string {
 	rightBlock := lipgloss.NewStyle().Width(rightWidth).Render(rightStr)
 
 	content := lipgloss.JoinHorizontal(lipgloss.Top, leftBlock, gapBlock, rightBlock)
-	return borderStyle.Copy().Width(cardWidth).Render(content)
+	return content
 }
 
 func (m model) renderDetailRow(label, value string, labelWidth int) string {
@@ -304,7 +464,7 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 	// Group historical entries into cards
 	type card struct {
 		entries []EntryData
-		color   lipgloss.Color
+		color   color.Color
 	}
 	var cards []card
 	var currentCard *card
@@ -328,17 +488,15 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 		cards = append(cards, *currentCard)
 	}
 
+	innerWidth := m.transcriptContentWidth()
+	separator := mutedStyle.Render(horizontalRule(innerWidth))
+
 	// Render historical cards
-	for _, c := range cards {
+	for idx, c := range cards {
+		if idx > 0 {
+			b.WriteString(separator + "\n")
+		}
 		var cardContent []string
-		cardWidth := m.transcriptContentWidth()
-		cardStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(c.color).
-			Padding(0, 1).
-			Width(cardWidth)
-		frameW, _ := cardStyle.GetFrameSize()
-		innerWidth := maxInt(1, cardWidth-frameW)
 
 		for _, entry := range c.entries {
 			style := kindMutedStyle(entry.Kind)
@@ -356,8 +514,9 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 						maxLines = uiToolResultMaxLinesExpanded(m.height)
 					}
 					truncated := truncateLines(resultText, maxLines)
-					block := mutedStyle.Render("  ↳ ") + wrapText(truncated, maxInt(1, innerWidth-4))
-					cardContent = append(cardContent, block)
+					wrapped := wrapText(truncated, maxInt(1, innerWidth-4))
+					block := mutedStyle.Render(prefixLines(wrapped, "↳ ", "  "))
+					cardContent = append(cardContent, indentLines(block, "  "))
 					continue
 				}
 				lines := strings.SplitN(text, "\n", 2)
@@ -373,7 +532,7 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 						// It's usually a JSON object string
 						if m.showToolDetails {
 							maxLines := uiToolArgsMaxLinesExpanded(m.height)
-							argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, maxLines))
+							argsBlock = mutedStyle.Render(truncateLines(argsStr, maxLines))
 						} else {
 							var argsMap map[string]interface{}
 							if err := json.Unmarshal([]byte(argsStr), &argsMap); err == nil {
@@ -384,25 +543,25 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 									}
 								}
 								if len(importantArgs) > 0 {
-									argsBlock = "  " + mutedStyle.Render(strings.Join(importantArgs, " · "))
+									argsBlock = mutedStyle.Render(strings.Join(importantArgs, " · "))
 								} else {
 									// Fallback: just truncate the raw string
 									maxLines := uiToolArgsMaxLinesCompact(m.height)
-									argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, maxLines))
+									argsBlock = mutedStyle.Render(truncateLines(argsStr, maxLines))
 								}
 							} else {
 								maxLines := uiToolArgsMaxLinesCompact(m.height)
-								argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, maxLines))
+								argsBlock = mutedStyle.Render(truncateLines(argsStr, maxLines))
 							}
 						}
 					}
 				}
 
-				block := accentStyle.Render(toolHeader)
+				block := accentStyle.Render(wrapText(toolHeader, innerWidth))
 				if argsBlock != "" {
-					block += "\n" + argsBlock
+					block += "\n" + indentLines(argsBlock, "  ")
 				}
-				cardContent = append(cardContent, block)
+				cardContent = append(cardContent, indentLines(block, "  "))
 				continue
 			}
 
@@ -436,16 +595,16 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 		}
 
 		cardStr := lipgloss.JoinVertical(lipgloss.Left, cardContent...)
-		borderedCard := cardStyle.Render(cardStr)
-
-		b.WriteString(borderedCard + "\n\n")
+		b.WriteString(cardStr)
+		if idx < len(cards)-1 {
+			b.WriteString("\n")
+		}
 	}
 
 	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m *model) renderLiveStatus() string {
-	// Render live area (LiveStatusCard) in its own accented border
 	if m.running || m.liveBuffer != "" {
 		var liveContent []string
 
@@ -457,14 +616,7 @@ func (m *model) renderLiveStatus() string {
 			liveContent = append(liveContent, actStr)
 		}
 
-		cardWidth := m.transcriptContentWidth()
-		cardStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(accentColor).
-			Padding(0, 1).
-			Width(cardWidth)
-		frameW, _ := cardStyle.GetFrameSize()
-		innerWidth := maxInt(1, cardWidth-frameW)
+		innerWidth := m.transcriptContentWidth()
 
 		if m.liveBuffer != "" {
 			bufStr := accentStyle.Render("assistant") + "\n" + wrapText(truncateLines(m.liveBuffer, uiToolResultMaxLinesCompact(m.height)), innerWidth)
@@ -472,20 +624,34 @@ func (m *model) renderLiveStatus() string {
 		}
 
 		if len(liveContent) > 0 {
-			liveStr := lipgloss.JoinVertical(lipgloss.Left, liveContent...)
-			borderedLive := cardStyle.Render(liveStr)
-			return borderedLive
+			return lipgloss.JoinVertical(lipgloss.Left, liveContent...)
 		}
 	}
 
 	return ""
 }
 
+func (m *model) renderLiveSection(boxWidth int) string {
+	live := m.renderLiveStatus()
+	if live == "" {
+		return ""
+	}
+	padX := uiContainerPadding(m.width)
+	innerWidth := maxInt(1, boxWidth-2*padX)
+	rule := mutedStyle.Render(horizontalRule(innerWidth))
+	liveBlock := padBlock(live, padX, boxWidth)
+	ruleBlock := padBlock(rule, padX, boxWidth)
+	return lipgloss.JoinVertical(lipgloss.Left, ruleBlock, liveBlock)
+}
+
 func (m *model) getGlamourRenderer(width int) markdownRenderer {
 	if width <= 0 {
 		width = 80
 	}
-	dark := lipgloss.HasDarkBackground()
+	dark := m.hasDarkBackground
+	if !m.bgKnown {
+		dark = true
+	}
 	if m.glamourRenderer != nil && m.glamourWidth == width && m.glamourDarkTheme == dark {
 		return m.glamourRenderer
 	}
@@ -512,9 +678,7 @@ func (m *model) getGlamourRenderer(width int) markdownRenderer {
 
 func (m *model) modalContentWidth() int {
 	boxWidth := m.transcriptBoxWidth()
-	modalStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(1, 2)
+	modalStyle := borderStyle.Copy().Padding(1, 2)
 	frameW, _ := modalStyle.GetFrameSize()
 	return maxInt(20, boxWidth-frameW)
 }
@@ -655,8 +819,7 @@ func (m *model) renderModal() string {
 		)
 	}
 
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+	return borderStyle.Copy().
 		BorderForeground(accentColor).
 		Padding(1, 2).
 		Render(content)
@@ -702,6 +865,34 @@ func wrapText(text string, width int) string {
 	return lipgloss.NewStyle().Width(width).Render(text)
 }
 
+func countWrappedLines(text string, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	if text == "" {
+		return 1
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	total := 0
+	for _, line := range lines {
+		if line == "" {
+			total++
+			continue
+		}
+		wrapped := wrapText(line, width)
+		if wrapped == "" {
+			total++
+			continue
+		}
+		total += len(strings.Split(wrapped, "\n"))
+	}
+	if total < 1 {
+		return 1
+	}
+	return total
+}
+
 func promptWrap(text string, width int) string {
 	return lipgloss.NewStyle().Width(width).Render(text)
 }
@@ -712,6 +903,51 @@ func truncateLines(text string, maxLines int) string {
 		hidden := len(lines) - maxLines
 		lines = lines[:maxLines]
 		lines = append(lines, fmt.Sprintf("... (%d more lines truncated)", hidden))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func blankLines(width, count int) string {
+	if count <= 0 {
+		return ""
+	}
+	if width < 1 {
+		width = 1
+	}
+	line := strings.Repeat(" ", width)
+	return strings.TrimRight(strings.Repeat(line+"\n", count), "\n")
+}
+
+func padBlock(content string, padX, width int) string {
+	return lipgloss.NewStyle().Padding(0, padX).Width(width).Render(content)
+}
+
+func horizontalRule(width int) string {
+	if width < 1 {
+		return ""
+	}
+	return strings.Repeat("─", width)
+}
+
+func indentLines(text, prefix string) string {
+	if text == "" || prefix == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func prefixLines(text, first, rest string) string {
+	if text == "" {
+		return first
+	}
+	lines := strings.Split(text, "\n")
+	lines[0] = first + lines[0]
+	for i := 1; i < len(lines); i++ {
+		lines[i] = rest + lines[i]
 	}
 	return strings.Join(lines, "\n")
 }
@@ -758,14 +994,16 @@ func matchSlashCommands(input string) []slashSuggestion {
 
 func (m model) renderSlashSuggestions(suggestions []slashSuggestion) string {
 	boxWidth := m.transcriptBoxWidth()
+	padX := uiContainerPadding(m.width)
+	innerWidth := maxInt(10, boxWidth-(padX*2))
 	maxNameWidth := 0
 	for _, s := range suggestions {
 		if len(s.completion) > maxNameWidth {
 			maxNameWidth = len(s.completion)
 		}
 	}
-	nameWidth := minInt(maxNameWidth+2, maxInt(12, boxWidth/2))
-	detailWidth := maxInt(10, boxWidth-nameWidth-4)
+	nameWidth := minInt(maxNameWidth+2, maxInt(12, innerWidth/2))
+	detailWidth := maxInt(10, innerWidth-nameWidth-2)
 
 	var lines []string
 	lines = append(lines, accentStyle.Render("Commands"))
@@ -780,7 +1018,5 @@ func (m model) renderSlashSuggestions(suggestions []slashSuggestion) string {
 		}
 		lines = append(lines, nameCol+detailCol)
 	}
-	return borderStyle.Copy().Width(boxWidth).Render(
-		lipgloss.JoinVertical(lipgloss.Left, lines...),
-	)
+	return padBlock(lipgloss.JoinVertical(lipgloss.Left, lines...), padX, boxWidth)
 }
