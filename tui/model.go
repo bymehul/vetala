@@ -62,6 +62,7 @@ type model struct {
 	glamourRenderer  markdownRenderer
 	glamourWidth     int
 	glamourDarkTheme bool
+	lastLiveEntry    bool
 
 	// Modals
 	modalState     ModalState
@@ -267,7 +268,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queueUpdate(deferredUpdate{kind: "flush"})
 			return m, nil
 		}
-		m.clearLiveBuffer()
+		m.flushLiveBuffer()
 
 	case MsgActivity:
 		if string(msg) == "" {
@@ -555,8 +556,24 @@ func (m *model) trimEntries() {
 }
 
 func (m *model) appendEntry(entry EntryData) {
+	if entry.Kind != "assistant" {
+		m.lastLiveEntry = false
+	}
+
+	if entry.Kind == "assistant" && m.lastLiveEntry && len(m.entries) > 0 {
+		lastIdx := len(m.entries) - 1
+		last := m.entries[lastIdx]
+		if last.Kind == "assistant" {
+			m.entries[lastIdx] = entry
+			m.lastLiveEntry = false
+			m.transcriptDirty = true
+			return
+		}
+	}
+
 	if entry.Kind == "assistant" {
 		m.liveBuffer = ""
+		m.lastLiveEntry = false
 	}
 	m.entries = append(m.entries, entry)
 	m.trimEntries()
@@ -575,11 +592,15 @@ func (m *model) appendLiveChunk(chunk string) {
 	m.transcriptDirty = true
 }
 
-func (m *model) clearLiveBuffer() {
-	if m.liveBuffer != "" {
-		m.liveBuffer = ""
-		m.transcriptDirty = true
+func (m *model) flushLiveBuffer() {
+	if m.liveBuffer == "" {
+		return
 	}
+	m.entries = append(m.entries, EntryData{Kind: "assistant", Text: m.liveBuffer})
+	m.trimEntries()
+	m.liveBuffer = ""
+	m.lastLiveEntry = true
+	m.transcriptDirty = true
 }
 
 func (m *model) queueUpdate(update deferredUpdate) {
@@ -597,7 +618,7 @@ func (m *model) flushPendingUpdates() {
 		case "chunk":
 			m.appendLiveChunk(update.chunk)
 		case "flush":
-			m.clearLiveBuffer()
+			m.flushLiveBuffer()
 		}
 	}
 	m.pendingUpdates = nil
