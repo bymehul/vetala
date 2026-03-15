@@ -27,6 +27,16 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.5.4
+Added:
+- Copy last reply action (Ctrl+Y) with a compact inline affordance after assistant replies.
+- Resume picker preview tuning and option line wrapping for tighter terminals.
+
+Patched:
+- Repeat-tool warning injection with configurable threshold/message.
+- Empty-response warning when a model returns no content (env-tunable).
+- Default mouse mode enables in-app scroll wheel; can be disabled for terminal selection.
+
 ### v0.5.3
 Added:
 - UI refresh: left-aligned layout with minimal framing.
