@@ -1,6 +1,6 @@
 {
   "name": "@vetala/vetala",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Terminal-first AI coding CLI with tools, memory, and local skills.",
