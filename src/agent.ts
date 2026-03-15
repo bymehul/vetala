@@ -89,6 +89,7 @@ export class Agent {
     }
 
     const seenToolCalls = new Set<string>();
+    let repeatWarningInjected = 0;
     let consecutiveApiErrors = 0;
 
     while (true) {
@@ -155,6 +156,7 @@ export class Agent {
         return;
       }
 
+      let suppressedRepeats = 0;
       for (const toolCall of turn.toolCalls) {
         this.throwIfStopped();
         this.options.ui.printToolCall(toolCall);
@@ -162,6 +164,7 @@ export class Agent {
         let result;
 
         if (seenToolCalls.has(signature)) {
+          suppressedRepeats += 1;
           this.options.ui.activity(`Skipping repeated ${toolCall.function.name} call.`);
           result = {
             summary: "Repeated tool call suppressed",
@@ -193,6 +196,15 @@ export class Agent {
             tool_call_id: toolCall.id
           })
         );
+      }
+
+      if (shouldInjectRepeatWarning(suppressedRepeats, repeatWarningInjected)) {
+        repeatWarningInjected += 1;
+        const warning = this.persistedMessage({
+          role: "user",
+          content: toolRepeatWarningMessage()
+        });
+        await this.options.sessionStore.appendMessage(this.options.session, warning);
       }
     }
   }
@@ -433,4 +445,87 @@ function isAbortError(error: unknown): boolean {
 
 function formatViewport(profile: RuntimeHostProfile): string {
   return profile.columns && profile.rows ? `${profile.columns}x${profile.rows}` : "unknown";
+}
+
+function envBool(name: string): boolean | undefined {
+  const raw = process.env[name];
+  if (!raw) {
+    return undefined;
+  }
+  switch (raw.trim().toLowerCase()) {
+    case "1":
+    case "true":
+    case "yes":
+    case "y":
+    case "on":
+      return true;
+    case "0":
+    case "false":
+    case "no":
+    case "n":
+    case "off":
+      return false;
+    default:
+      return undefined;
+  }
+}
+
+function envInt(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) {
+    return undefined;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    return undefined;
+  }
+  return Math.floor(value);
+}
+
+function repeatWarningEnabled(): boolean {
+  const value = envBool("VETALA_TOOL_REPEAT_WARN");
+  return value ?? true;
+}
+
+function repeatWarningMax(): number {
+  const value = envInt("VETALA_TOOL_REPEAT_WARN_MAX");
+  if (value === undefined) {
+    return 1;
+  }
+  return value;
+}
+
+function repeatWarningThreshold(): number {
+  const value = envInt("VETALA_TOOL_REPEAT_WARN_THRESHOLD");
+  if (value === undefined) {
+    return 1;
+  }
+  return value;
+}
+
+function shouldInjectRepeatWarning(suppressedRepeats: number, alreadyInjected: number): boolean {
+  if (!repeatWarningEnabled()) {
+    return false;
+  }
+  if (suppressedRepeats < repeatWarningThreshold()) {
+    return false;
+  }
+  const max = repeatWarningMax();
+  if (max <= 0) {
+    return true;
+  }
+  return alreadyInjected < max;
+}
+
+function toolRepeatWarningMessage(): string {
+  const envMessage = process.env.VETALA_TOOL_REPEAT_WARN_MESSAGE;
+  if (envMessage && envMessage.trim()) {
+    return envMessage.trim();
+  }
+  return [
+    "SYSTEM ALERT: Repeated tool calls were suppressed.",
+    "Do not re-issue the same tool call in this turn.",
+    "Reuse the earlier tool result and proceed with the answer.",
+    "If more information is needed, ask a clarification question instead of calling tools again."
+  ].join(" ");
 }
