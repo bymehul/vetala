@@ -23,6 +23,16 @@ const (
 	ModalInput
 )
 
+type markdownRenderer interface {
+	Render(string) (string, error)
+}
+
+type deferredUpdate struct {
+	kind  string
+	entry EntryData
+	chunk string
+}
+
 type model struct {
 	// Layout
 	width  int
@@ -41,10 +51,17 @@ type model struct {
 	spinner   spinner.Model
 
 	// Transcript
-	entries        []EntryData
-	lastPrintedIdx int
-	liveBuffer     string
-	activity       *string
+	entries          []EntryData
+	liveBuffer       string
+	activity         *string
+	autoScroll       bool
+	transcriptDirty  bool
+	pendingUpdates   []deferredUpdate
+	showToolDetails  bool
+	showDashboard    bool
+	glamourRenderer  markdownRenderer
+	glamourWidth     int
+	glamourDarkTheme bool
 
 	// Modals
 	modalState     ModalState
@@ -77,7 +94,7 @@ func resetModalClosedCmd() tea.Cmd {
 	}
 }
 
-func initialModel(w io.Writer) model {
+func initialModel(w io.Writer) *model {
 	ti := textinput.New()
 	ti.Placeholder = "Ask Vetala..."
 	ti.Focus()
@@ -90,26 +107,30 @@ func initialModel(w io.Writer) model {
 
 	vp := viewport.New(100, 20)
 	vp.YPosition = 0
+	vp.MouseWheelEnabled = true
 
 	mi := textinput.New()
 	mi.Focus()
 	mi.Width = 60
 
-	return model{
-		textInput:      ti,
-		spinner:        sp,
-		modalInput:     mi,
-		status:         "Connecting...",
-		backendWriter:  w,
-		lastPrintedIdx: 0,
+	return &model{
+		textInput:       ti,
+		spinner:         sp,
+		viewport:        vp,
+		modalInput:      mi,
+		status:          "Connecting...",
+		backendWriter:   w,
+		autoScroll:      true,
+		transcriptDirty: true,
+		showToolDetails: uiToolDetailsDefault(),
 	}
 }
 
-func (m model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		cmd  tea.Cmd
 		cmds []tea.Cmd
@@ -131,6 +152,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlD:
 			m.modalState = ModalExit
 			return m, nil
+		case tea.KeyCtrlT:
+			m.showToolDetails = !m.showToolDetails
+			m.transcriptDirty = true
+			return m, nil
+		}
+
+		if m.handleScrollKey(msg) {
+			return m, nil
 		}
 
 		// Handle active modal input
@@ -144,6 +173,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					sendSubmitInput(m.backendWriter, m.promptInputId, "")
 					m.modalState = ModalNone
 					m.modalJustClosed = true
+					m.flushPendingUpdates()
 					return m, resetModalClosedCmd()
 				}
 				m.modalInput, cmd = m.modalInput.Update(msg)
@@ -158,6 +188,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v := strings.TrimSpace(m.textInput.Value())
 			if v != "" {
 				m.entries = append(m.entries, EntryData{Kind: "user", Text: v})
+				m.trimEntries()
+				m.transcriptDirty = true
+				m.autoScroll = true
 				m.textInput.SetValue("")
 
 				isCommand := strings.HasPrefix(v, "/")
@@ -166,12 +199,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "Running agent"
 				}
 
-				// Print immediately
-				toPrint := m.entries[m.lastPrintedIdx:]
-				m.lastPrintedIdx = len(m.entries)
-
 				sendInput(m.backendWriter, v)
-				return m, tea.Println(m.renderCardsToPrint(toPrint))
+				return m, nil
 			}
 			return m, nil
 		case tea.KeyTab:
@@ -191,9 +220,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textInput, cmd = m.textInput.Update(msg)
 		cmds = append(cmds, cmd)
 
+	case tea.MouseMsg:
+		if m.modalState == ModalNone {
+			m.viewport, cmd = m.viewport.Update(msg)
+			m.autoScroll = m.viewport.AtBottom()
+			cmds = append(cmds, cmd)
+		}
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width - 2 // leave a small margin for terminal scrollbars
 		m.height = msg.Height
+		m.updateInputWidths()
+		m.transcriptDirty = true
 		return m, nil
 
 	// IPC Messages
@@ -205,27 +243,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.trusted {
 			m.modalState = ModalTrust
 			m.trustWs = msg.Workspace
-			cmds = append(cmds, tea.Println(m.renderDashboard()))
+			m.showDashboard = true
 		}
+		m.transcriptDirty = true
 
 	case MsgEntry:
-		m.entries = append(m.entries, EntryData(msg))
-		// Print immediately
-		toPrint := m.entries[m.lastPrintedIdx:]
-		m.lastPrintedIdx = len(m.entries)
-		cmds = append(cmds, tea.Println(m.renderCardsToPrint(toPrint)))
+		entry := EntryData(msg)
+		if m.modalState != ModalNone {
+			m.queueUpdate(deferredUpdate{kind: "entry", entry: entry})
+			return m, nil
+		}
+		m.appendEntry(entry)
 
 	case MsgChunk:
-		m.liveBuffer += string(msg)
+		if m.modalState != ModalNone {
+			m.queueUpdate(deferredUpdate{kind: "chunk", chunk: string(msg)})
+			return m, nil
+		}
+		m.appendLiveChunk(string(msg))
 
 	case MsgFlush:
-		if m.liveBuffer != "" {
-			m.entries = append(m.entries, EntryData{Kind: "assistant", Text: m.liveBuffer})
-			m.liveBuffer = ""
-			toPrint := m.entries[m.lastPrintedIdx:]
-			m.lastPrintedIdx = len(m.entries)
-			cmds = append(cmds, tea.Println(m.renderCardsToPrint(toPrint)))
+		if m.modalState != ModalNone {
+			m.queueUpdate(deferredUpdate{kind: "flush"})
+			return m, nil
 		}
+		m.clearLiveBuffer()
 
 	case MsgActivity:
 		if string(msg) == "" {
@@ -234,6 +276,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			lbl := string(msg)
 			m.activity = &lbl
 		}
+		m.transcriptDirty = true
 
 	case MsgSpinner:
 		if msg.Label != nil {
@@ -242,6 +285,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Spinner stopped — clear activity
 			m.activity = nil
 		}
+		m.transcriptDirty = true
 
 	case MsgStatus:
 		m.status = string(msg)
@@ -250,6 +294,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.running = false
 			m.activity = nil
 		}
+		m.transcriptDirty = true
 
 	case MsgPromptTrust:
 		m.modalState = ModalTrust
@@ -281,9 +326,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MsgClear:
 		m.entries = nil
-		m.lastPrintedIdx = 0
 		m.liveBuffer = ""
 		m.activity = nil
+		m.transcriptDirty = true
+		m.autoScroll = true
+		m.viewport.SetContent("")
+		m.viewport.GotoTop()
 		cmds = append(cmds, tea.ClearScreen)
 
 	case MsgModalClosedReset:
@@ -297,18 +345,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m model) visibleSelectRows() int {
-	height := m.height - 12
-	if height < 4 {
-		height = 4
-	}
-	if height > 12 {
-		height = 12
-	}
-	return height
+func (m *model) visibleSelectRows() int {
+	return uiSelectVisibleRows(m.height)
 }
 
-func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.modalState == ModalSelect && m.modalSelectReset {
 		m.modalSelectReset = false
 	}
@@ -418,15 +459,18 @@ func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) triggerActiveModal() (tea.Model, tea.Cmd) {
+func (m *model) triggerActiveModal() (tea.Model, tea.Cmd) {
 	switch m.modalState {
 	case ModalTrust:
 		if m.modalSelection == 0 {
 			m.modalState = ModalNone
 			m.trusted = true
 			m.status = "Ready"
+			m.showDashboard = false
+			m.transcriptDirty = true
 			sendTrust(m.backendWriter, true)
 			m.modalJustClosed = true
+			m.flushPendingUpdates()
 			return m, resetModalClosedCmd()
 		} else {
 			sendExit(m.backendWriter)
@@ -442,6 +486,7 @@ func (m model) triggerActiveModal() (tea.Model, tea.Cmd) {
 			sendApproval(m.backendWriter, "deny")
 		}
 		m.modalJustClosed = true
+		m.flushPendingUpdates()
 		return m, resetModalClosedCmd()
 	case ModalExit:
 		if m.modalSelection == 0 {
@@ -450,6 +495,7 @@ func (m model) triggerActiveModal() (tea.Model, tea.Cmd) {
 		} else {
 			m.modalState = ModalNone
 			m.modalJustClosed = true
+			m.flushPendingUpdates()
 			return m, resetModalClosedCmd()
 		}
 
@@ -457,13 +503,102 @@ func (m model) triggerActiveModal() (tea.Model, tea.Cmd) {
 		sendSubmitSelect(m.backendWriter, m.promptSelectId, m.modalSelection)
 		m.modalState = ModalNone
 		m.modalJustClosed = true
+		m.flushPendingUpdates()
 		return m, resetModalClosedCmd()
 
 	case ModalInput:
 		sendSubmitInput(m.backendWriter, m.promptInputId, strings.TrimSpace(m.modalInput.Value()))
 		m.modalState = ModalNone
 		m.modalJustClosed = true
+		m.flushPendingUpdates()
 		return m, resetModalClosedCmd()
 	}
 	return m, nil
+}
+
+func (m *model) handleScrollKey(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyPgUp:
+		m.viewport.ViewUp()
+	case tea.KeyPgDown:
+		m.viewport.ViewDown()
+	case tea.KeyHome:
+		m.viewport.GotoTop()
+	case tea.KeyEnd:
+		m.viewport.GotoBottom()
+	default:
+		return false
+	}
+	m.autoScroll = m.viewport.AtBottom()
+	return true
+}
+
+func (m *model) updateInputWidths() {
+	if m.width <= 0 {
+		return
+	}
+	frameW, _ := borderStyle.GetFrameSize()
+	prefixWidth := lipgloss.Width("❯ ")
+	textWidth := maxInt(10, m.transcriptBoxWidth()-frameW-prefixWidth-2)
+	m.textInput.Width = textWidth
+
+	modalWidth := maxInt(10, m.modalContentWidth())
+	m.modalInput.Width = modalWidth
+}
+
+func (m *model) trimEntries() {
+	maxEntries := uiMaxEntries(m.height)
+	if maxEntries <= 0 || len(m.entries) <= maxEntries {
+		return
+	}
+	m.entries = m.entries[len(m.entries)-maxEntries:]
+}
+
+func (m *model) appendEntry(entry EntryData) {
+	if entry.Kind == "assistant" {
+		m.liveBuffer = ""
+	}
+	m.entries = append(m.entries, entry)
+	m.trimEntries()
+	m.transcriptDirty = true
+}
+
+func (m *model) appendLiveChunk(chunk string) {
+	if chunk == "" {
+		return
+	}
+	m.liveBuffer += chunk
+	maxChars := uiLivePreviewMaxChars(m.width, m.height)
+	if maxChars > 0 && len(m.liveBuffer) > maxChars {
+		m.liveBuffer = m.liveBuffer[len(m.liveBuffer)-maxChars:]
+	}
+	m.transcriptDirty = true
+}
+
+func (m *model) clearLiveBuffer() {
+	if m.liveBuffer != "" {
+		m.liveBuffer = ""
+		m.transcriptDirty = true
+	}
+}
+
+func (m *model) queueUpdate(update deferredUpdate) {
+	m.pendingUpdates = append(m.pendingUpdates, update)
+}
+
+func (m *model) flushPendingUpdates() {
+	if len(m.pendingUpdates) == 0 {
+		return
+	}
+	for _, update := range m.pendingUpdates {
+		switch update.kind {
+		case "entry":
+			m.appendEntry(update.entry)
+		case "chunk":
+			m.appendLiveChunk(update.chunk)
+		case "flush":
+			m.clearLiveBuffer()
+		}
+	}
+	m.pendingUpdates = nil
 }

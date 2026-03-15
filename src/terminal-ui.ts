@@ -129,6 +129,10 @@ export class TerminalUI {
     console.log(`${chalk.cyan("assistant")} ${chalk.dim("│")} ${message}`);
   }
 
+  finalizeAssistantMessage(_message: string): void {
+    // No-op for the plain terminal UI; streaming already printed output.
+  }
+
   endAssistantTurn(): void {
     if (!this.assistantLineOpen) {
       return;

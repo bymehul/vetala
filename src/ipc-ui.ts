@@ -93,6 +93,14 @@ export class IpcTerminalUI extends TerminalUI {
         sendIPC("entry", { kind: "assistant", text: message });
     }
 
+    override finalizeAssistantMessage(message: string): void {
+        if (!message) {
+            return;
+        }
+        sendIPC("flush", {});
+        sendIPC("entry", { kind: "assistant", text: message });
+    }
+
     override endAssistantTurn(): void {
         sendIPC("flush", {});
     }

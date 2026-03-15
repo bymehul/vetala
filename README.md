@@ -27,6 +27,16 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.5.3
+Added:
+- Viewport-backed transcript with in-app scrollback (PgUp/PgDn + mouse wheel).
+- Global tool details toggle (Ctrl+T) and env-tunable UI/search limits.
+
+Patched:
+- Buffered output while modals are open to prevent UI jumps.
+- Streaming now sends a final assistant entry; live preview is capped to avoid duplication.
+- Fast search skips binaries/oversized files and handles long lines safely.
+
 ### v0.5.2
 Added:
 - `/resume` now skips empty sessions and previews the last few messages when resuming.

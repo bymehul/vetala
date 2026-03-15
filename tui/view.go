@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Styles
@@ -35,7 +35,7 @@ var (
 	kindActivityStyle  = mutedStyle.Copy()
 )
 
-func (m model) View() string {
+func (m *model) View() string {
 	if !m.ready {
 		return lipgloss.Place(m.width, 2, lipgloss.Center, lipgloss.Center, "Connecting to backend...")
 	}
@@ -44,31 +44,6 @@ func (m model) View() string {
 	footerStr := m.renderFooter()
 
 	var midSection string
-	if m.modalState != ModalNone {
-		modalH := 15 // Default approx height for modals in inline mode
-		if m.modalState == ModalSelect {
-			modalH = m.visibleSelectRows() + 6
-		}
-		maxH := m.height - 4
-		if maxH < 10 {
-			maxH = 10
-		}
-		if modalH > maxH {
-			modalH = maxH
-		}
-		if modalH < 10 {
-			modalH = 10
-		}
-		modalStr := lipgloss.Place(
-			m.width-2, modalH,
-			lipgloss.Center, lipgloss.Center,
-			m.renderModal(),
-		)
-		midSection = modalStr
-	} else {
-		midSection = m.renderLiveStatus()
-	}
-
 	var slashBox string
 	if m.modalState == ModalNone && !m.running {
 		v := m.textInput.Value()
@@ -78,6 +53,27 @@ func (m model) View() string {
 				slashBox = m.renderSlashSuggestions(matches)
 			}
 		}
+	}
+
+	contentWidth := m.transcriptBoxWidth()
+	contentHeight := m.availableTranscriptHeight(inputBox, slashBox, footerStr)
+	m.updateViewportLayout(contentWidth, contentHeight)
+	m.refreshTranscript()
+
+	transcriptBox := borderStyle.Copy().
+		Width(contentWidth).
+		Height(contentHeight).
+		Render(m.viewport.View())
+
+	if m.modalState != ModalNone {
+		modalStr := lipgloss.Place(
+			contentWidth, contentHeight,
+			lipgloss.Center, lipgloss.Center,
+			m.renderModal(),
+		)
+		midSection = modalStr
+	} else {
+		midSection = transcriptBox
 	}
 
 	parts := []string{midSection, inputBox}
@@ -109,12 +105,81 @@ func (m model) View() string {
 	return viewStr
 }
 
+func (m *model) transcriptBoxWidth() int {
+	if m.width > 0 {
+		return maxInt(20, m.width-2)
+	}
+	if value, ok := envInt("COLUMNS"); ok && value > 0 {
+		return maxInt(20, value-2)
+	}
+	return 80
+}
+
+func (m *model) transcriptContentWidth() int {
+	frameW, _ := borderStyle.GetFrameSize()
+	return maxInt(10, m.transcriptBoxWidth()-frameW)
+}
+
+func (m *model) availableTranscriptHeight(inputBox, slashBox, footerStr string) int {
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+	used := lipgloss.Height(inputBox) + lipgloss.Height(footerStr)
+	if slashBox != "" {
+		used += lipgloss.Height(slashBox)
+	}
+	available := height - used
+	if available < 1 {
+		available = 1
+	}
+	return available
+}
+
+func (m *model) updateViewportLayout(boxWidth, boxHeight int) {
+	frameW, frameH := borderStyle.GetFrameSize()
+	contentWidth := maxInt(1, boxWidth-frameW)
+	contentHeight := maxInt(1, boxHeight-frameH)
+
+	if m.viewport.Width != contentWidth || m.viewport.Height != contentHeight {
+		m.viewport.Width = contentWidth
+		m.viewport.Height = contentHeight
+		m.transcriptDirty = true
+	}
+}
+
+func (m *model) refreshTranscript() {
+	if !m.transcriptDirty {
+		return
+	}
+	content := m.renderTranscriptContent()
+	m.viewport.SetContent(content)
+	if m.autoScroll {
+		m.viewport.GotoBottom()
+	}
+	m.transcriptDirty = false
+}
+
+func (m *model) renderTranscriptContent() string {
+	var parts []string
+	if m.showDashboard {
+		parts = append(parts, m.renderDashboard())
+	}
+	if transcript := m.renderCardsToPrint(m.entries); transcript != "" {
+		parts = append(parts, transcript)
+	}
+	if live := m.renderLiveStatus(); live != "" {
+		parts = append(parts, live)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func (m model) renderInputBox() string {
 	inputStr := accentStyle.Render("❯ ") + m.textInput.View()
 	if m.running {
 		inputStr += mutedStyle.Render("  (agent running)")
 	}
-	return borderStyle.Copy().Width(m.width - 2).Render(inputStr)
+	return borderStyle.Copy().Width(m.transcriptBoxWidth()).Render(inputStr)
 }
 
 func (m model) renderFooter() string {
@@ -123,7 +188,7 @@ func (m model) renderFooter() string {
 		statusSuffix += " · running"
 	}
 
-	footerLeft := "/help · /undo · Ctrl+C pause · Ctrl+D exit"
+	footerLeft := "/help · /undo · PgUp/PgDn scroll · Ctrl+T tool details · Ctrl+C pause · Ctrl+D exit"
 	footerStr := mutedStyle.Render(footerLeft)
 
 	// Pad middle to align right
@@ -136,20 +201,27 @@ func (m model) renderFooter() string {
 }
 
 func (m model) renderDashboard() string {
+	labels := []string{"provider", "model", "auth", "directory", "session"}
+	labelWidth := 0
+	for _, label := range labels {
+		if len(label) > labelWidth {
+			labelWidth = len(label)
+		}
+	}
 	leftStr := lipgloss.JoinVertical(lipgloss.Left,
 		accentStyle.Render("Vetala"),
 		bold.Render("Ready."),
 		"",
-		m.renderDetailRow("provider", m.dashboard.Provider),
-		m.renderDetailRow("model", m.dashboard.Model),
+		m.renderDetailRow("provider", m.dashboard.Provider, labelWidth),
+		m.renderDetailRow("model", m.dashboard.Model, labelWidth),
 		m.renderDetailRow("auth", func() string {
 			if m.dashboard.IsLoggedIn {
 				return accentStyle.Render("Logged In")
 			}
 			return warnStyle.Render("Logged Out")
-		}()),
-		m.renderDetailRow("directory", m.dashboard.Workspace),
-		m.renderDetailRow("session", m.dashboard.SessionId),
+		}(), labelWidth),
+		m.renderDetailRow("directory", m.dashboard.Workspace, labelWidth),
+		m.renderDetailRow("session", m.dashboard.SessionId, labelWidth),
 	)
 
 	rightStr := lipgloss.JoinVertical(lipgloss.Left,
@@ -170,19 +242,18 @@ func (m model) renderDashboard() string {
 		rightStr,
 	)
 
-	return borderStyle.Copy().Width(m.width - 2).Render(content)
+	return borderStyle.Copy().Width(m.transcriptContentWidth()).Render(content)
 }
 
-func (m model) renderDetailRow(label, value string) string {
+func (m model) renderDetailRow(label, value string, labelWidth int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Bottom,
-		mutedStyle.Copy().Width(12).Render(label),
+		mutedStyle.Copy().Width(labelWidth+2).Render(label),
 		value,
 	)
 }
 
-// renderCardsToPrint takes a slice of new entries and renders them as
-// fully styled transcript cards to be printed to the terminal scrollback.
-func (m model) renderCardsToPrint(entries []EntryData) string {
+// renderCardsToPrint takes a slice of entries and renders them as transcript cards.
+func (m *model) renderCardsToPrint(entries []EntryData) string {
 	if len(entries) == 0 {
 		return ""
 	}
@@ -218,6 +289,15 @@ func (m model) renderCardsToPrint(entries []EntryData) string {
 	// Render historical cards
 	for _, c := range cards {
 		var cardContent []string
+		cardWidth := m.transcriptContentWidth()
+		cardStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(c.color).
+			Padding(0, 1).
+			Width(cardWidth)
+		frameW, _ := cardStyle.GetFrameSize()
+		innerWidth := maxInt(1, cardWidth-frameW)
+
 		for _, entry := range c.entries {
 			style := kindMutedStyle(entry.Kind)
 			label := kindLabel(entry.Kind)
@@ -229,8 +309,12 @@ func (m model) renderCardsToPrint(entries []EntryData) string {
 					// Tool result - render compactly
 					resultText := strings.TrimPrefix(text, "↳")
 					resultText = strings.TrimSpace(resultText)
-					truncated := truncateLines(resultText, 10)
-					block := mutedStyle.Render("  ↳ ") + wrapText(truncated, m.width-10)
+					maxLines := uiToolResultMaxLinesCompact(m.height)
+					if m.showToolDetails {
+						maxLines = uiToolResultMaxLinesExpanded(m.height)
+					}
+					truncated := truncateLines(resultText, maxLines)
+					block := mutedStyle.Render("  ↳ ") + wrapText(truncated, maxInt(1, innerWidth-4))
 					cardContent = append(cardContent, block)
 					continue
 				}
@@ -245,22 +329,29 @@ func (m model) renderCardsToPrint(entries []EntryData) string {
 					argsStr := strings.TrimSpace(lines[1])
 					if argsStr != "" {
 						// It's usually a JSON object string
-						var argsMap map[string]interface{}
-						if err := json.Unmarshal([]byte(argsStr), &argsMap); err == nil {
-							var importantArgs []string
-							for k, v := range argsMap {
-								if k == "file_path" || k == "TargetFile" || k == "CommandLine" || k == "command" || k == "query" || k == "url" {
-									importantArgs = append(importantArgs, fmt.Sprintf("%s: %v", k, v))
-								}
-							}
-							if len(importantArgs) > 0 {
-								argsBlock = "  " + mutedStyle.Render(strings.Join(importantArgs, " · "))
-							} else {
-								// Fallback: just truncate the raw string
-								argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, 3))
-							}
+						if m.showToolDetails {
+							maxLines := uiToolArgsMaxLinesExpanded(m.height)
+							argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, maxLines))
 						} else {
-							argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, 3))
+							var argsMap map[string]interface{}
+							if err := json.Unmarshal([]byte(argsStr), &argsMap); err == nil {
+								var importantArgs []string
+								for k, v := range argsMap {
+									if k == "file_path" || k == "TargetFile" || k == "CommandLine" || k == "command" || k == "query" || k == "url" {
+										importantArgs = append(importantArgs, fmt.Sprintf("%s: %v", k, v))
+									}
+								}
+								if len(importantArgs) > 0 {
+									argsBlock = "  " + mutedStyle.Render(strings.Join(importantArgs, " · "))
+								} else {
+									// Fallback: just truncate the raw string
+									maxLines := uiToolArgsMaxLinesCompact(m.height)
+									argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, maxLines))
+								}
+							} else {
+								maxLines := uiToolArgsMaxLinesCompact(m.height)
+								argsBlock = "  " + mutedStyle.Render(truncateLines(argsStr, maxLines))
+							}
 						}
 					}
 				}
@@ -275,25 +366,21 @@ func (m model) renderCardsToPrint(entries []EntryData) string {
 
 			if entry.Kind == "user" {
 				// User messages rendered bold
-				block := bold.Render(label) + "\n" + wrapText(text, m.width-6)
+				block := bold.Render(label) + "\n" + wrapText(text, innerWidth)
 				cardContent = append(cardContent, block)
 				continue
 			}
 
 			if entry.Kind == "assistant" {
-				glamourStyle := "dark"
-				if !lipgloss.HasDarkBackground() {
-					glamourStyle = "light"
-				}
-				r, _ := glamour.NewTermRenderer(
-					glamour.WithStandardStyle(glamourStyle),
-					glamour.WithWordWrap(m.width-6),
-				)
-				out, err := r.Render(text)
-				if err == nil && out != "" {
-					text = strings.TrimSpace(out)
+				if r := m.getGlamourRenderer(innerWidth); r != nil {
+					out, err := r.Render(text)
+					if err == nil && out != "" {
+						text = strings.TrimSpace(out)
+					} else {
+						text = wrapText(text, innerWidth)
+					}
 				} else {
-					text = wrapText(text, m.width-6)
+					text = wrapText(text, innerWidth)
 				}
 				block := style.Render(label) + "\n" + text
 				cardContent = append(cardContent, block)
@@ -301,18 +388,13 @@ func (m model) renderCardsToPrint(entries []EntryData) string {
 			}
 
 			// Default rendering for other kinds
-			text = truncateLines(text, 40)
-			block := style.Render(label) + "\n" + wrapText(text, m.width-6)
+			text = truncateLines(text, uiToolResultMaxLinesCompact(m.height))
+			block := style.Render(label) + "\n" + wrapText(text, innerWidth)
 			cardContent = append(cardContent, block)
 		}
 
 		cardStr := lipgloss.JoinVertical(lipgloss.Left, cardContent...)
-		borderedCard := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(c.color).
-			Padding(0, 1).
-			Width(m.width - 2). // Match main container width
-			Render(cardStr)
+		borderedCard := cardStyle.Render(cardStr)
 
 		b.WriteString(borderedCard + "\n\n")
 	}
@@ -320,7 +402,7 @@ func (m model) renderCardsToPrint(entries []EntryData) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m model) renderLiveStatus() string {
+func (m *model) renderLiveStatus() string {
 	// Render live area (LiveStatusCard) in its own accented border
 	if m.running || m.liveBuffer != "" {
 		var liveContent []string
@@ -333,20 +415,23 @@ func (m model) renderLiveStatus() string {
 			liveContent = append(liveContent, actStr)
 		}
 
+		cardWidth := m.transcriptContentWidth()
+		cardStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(accentColor).
+			Padding(0, 1).
+			Width(cardWidth)
+		frameW, _ := cardStyle.GetFrameSize()
+		innerWidth := maxInt(1, cardWidth-frameW)
+
 		if m.liveBuffer != "" {
-			bufStr := accentStyle.Render("assistant") + "\n" + wrapText(truncateLines(m.liveBuffer, 40), m.width-6)
+			bufStr := accentStyle.Render("assistant") + "\n" + wrapText(truncateLines(m.liveBuffer, uiToolResultMaxLinesCompact(m.height)), innerWidth)
 			liveContent = append(liveContent, bufStr)
 		}
 
 		if len(liveContent) > 0 {
 			liveStr := lipgloss.JoinVertical(lipgloss.Left, liveContent...)
-			borderedLive := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(accentColor).
-				Padding(0, 1).
-				Width(m.width - 2). // Match main container width
-				Render(liveStr)
-
+			borderedLive := cardStyle.Render(liveStr)
 			return borderedLive
 		}
 	}
@@ -354,7 +439,45 @@ func (m model) renderLiveStatus() string {
 	return ""
 }
 
-func (m model) renderModal() string {
+func (m *model) getGlamourRenderer(width int) markdownRenderer {
+	if width <= 0 {
+		width = 80
+	}
+	dark := lipgloss.HasDarkBackground()
+	if m.glamourRenderer != nil && m.glamourWidth == width && m.glamourDarkTheme == dark {
+		return m.glamourRenderer
+	}
+
+	style := "dark"
+	if !dark {
+		style = "light"
+	}
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle(style),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		m.glamourRenderer = nil
+		return nil
+	}
+
+	m.glamourRenderer = renderer
+	m.glamourWidth = width
+	m.glamourDarkTheme = dark
+	return renderer
+}
+
+func (m *model) modalContentWidth() int {
+	boxWidth := m.transcriptBoxWidth()
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1, 2)
+	frameW, _ := modalStyle.GetFrameSize()
+	return maxInt(20, boxWidth-frameW)
+}
+
+func (m *model) renderModal() string {
 	var content string
 
 	selected := m.modalSelection
@@ -371,16 +494,15 @@ func (m model) renderModal() string {
 
 	switch m.modalState {
 	case ModalTrust:
+		wrapWidth := m.modalContentWidth()
 		content = lipgloss.JoinVertical(lipgloss.Left,
 			accentStyle.Render("Accessing workspace"),
 			"",
-			m.trustWs,
+			wrapText(m.trustWs, wrapWidth),
 			"",
-			"Quick safety check: is this a project you",
-			"created or one you trust?",
+			wrapText("Quick safety check: is this a project you created or one you trust?", wrapWidth),
 			"",
-			"Vetala will be able to read, edit, and",
-			"execute files here.",
+			wrapText("Vetala will be able to read, edit, and execute files here.", wrapWidth),
 			"",
 			cursor(0, "1. Yes, I trust this folder"),
 			cursor(1, "2. No, exit"),
@@ -388,10 +510,11 @@ func (m model) renderModal() string {
 			mutedStyle.Render("Press 1, 2, or arrow keys + Enter"),
 		)
 	case ModalApproval:
+		wrapWidth := m.modalContentWidth()
 		content = lipgloss.JoinVertical(lipgloss.Left,
 			warnStyle.Render("Approval required"),
 			"",
-			promptWrap(m.approvalData, 60),
+			promptWrap(m.approvalData, wrapWidth),
 			"",
 			cursor(0, "1. Allow once"),
 			cursor(1, "2. Allow for session"),
@@ -400,10 +523,11 @@ func (m model) renderModal() string {
 			mutedStyle.Render("Press 1, 2, 3, or arrow keys + Enter"),
 		)
 	case ModalExit:
+		wrapWidth := m.modalContentWidth()
 		content = lipgloss.JoinVertical(lipgloss.Left,
 			errorStyle.Render("Exit Vetala?"),
 			"",
-			"Session state is already saved.",
+			wrapText("Session state is already saved.", wrapWidth),
 			"",
 			cursor(0, "1. Exit"),
 			cursor(1, "2. Stay"),
@@ -411,11 +535,12 @@ func (m model) renderModal() string {
 			mutedStyle.Render("Press 1, 2, or arrow keys + Enter"),
 		)
 	case ModalPause:
+		wrapWidth := m.modalContentWidth()
 		content = lipgloss.JoinVertical(lipgloss.Left,
 			accentStyle.Render("Paused"),
 			"",
-			"Press Ctrl+C again to resume.",
-			"Press Ctrl+D to exit.",
+			wrapText("Press Ctrl+C again to resume.", wrapWidth),
+			wrapText("Press Ctrl+D to exit.", wrapWidth),
 		)
 	case ModalSelect:
 		var items []string
@@ -476,10 +601,11 @@ func (m model) renderModal() string {
 		content = lipgloss.JoinVertical(lipgloss.Left, items...)
 
 	case ModalInput:
+		wrapWidth := m.modalContentWidth()
 		content = lipgloss.JoinVertical(lipgloss.Left,
 			accentStyle.Render(m.promptInputTitle),
 			"",
-			mutedStyle.Render(m.promptInputText),
+			mutedStyle.Render(promptWrap(m.promptInputText, wrapWidth)),
 			"",
 			m.modalInput.View(),
 			"",
@@ -589,20 +715,30 @@ func matchSlashCommands(input string) []slashSuggestion {
 }
 
 func (m model) renderSlashSuggestions(suggestions []slashSuggestion) string {
+	boxWidth := m.transcriptBoxWidth()
+	maxNameWidth := 0
+	for _, s := range suggestions {
+		if len(s.completion) > maxNameWidth {
+			maxNameWidth = len(s.completion)
+		}
+	}
+	nameWidth := minInt(maxNameWidth+2, maxInt(12, boxWidth/2))
+	detailWidth := maxInt(10, boxWidth-nameWidth-4)
+
 	var lines []string
 	lines = append(lines, accentStyle.Render("Commands"))
 	lines = append(lines, mutedStyle.Render("Tab autocompletes the first match."))
 	for i, s := range suggestions {
-		nameCol := lipgloss.NewStyle().Width(20).Render(s.completion)
-		detailCol := mutedStyle.Render(s.detail)
+		nameCol := lipgloss.NewStyle().Width(nameWidth).Render(s.completion)
+		detailCol := mutedStyle.Render(wrapText(s.detail, detailWidth))
 		if i == 0 {
-			nameCol = accentStyle.Render("❯ " + lipgloss.NewStyle().Width(18).Render(s.completion))
+			nameCol = accentStyle.Render("❯ " + lipgloss.NewStyle().Width(maxInt(1, nameWidth-2)).Render(s.completion))
 		} else {
 			nameCol = "  " + nameCol
 		}
 		lines = append(lines, nameCol+detailCol)
 	}
-	return borderStyle.Copy().Width(m.width - 2).Render(
+	return borderStyle.Copy().Width(boxWidth).Render(
 		lipgloss.JoinVertical(lipgloss.Left, lines...),
 	)
 }

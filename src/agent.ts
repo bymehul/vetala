@@ -235,6 +235,9 @@ export class Agent {
         },
         requestOptions
       );
+      if (turn.content) {
+        this.options.ui.finalizeAssistantMessage(turn.content);
+      }
       return turn;
     } catch (error) {
       if (isAbortError(error)) {

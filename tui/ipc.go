@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -153,6 +154,11 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 	var matches []SearchMatch
 	var mu sync.Mutex
 
+	maxFileBytes := fastSearchMaxFileBytes()
+	maxLineBytes := fastSearchMaxLineBytes()
+	sniffBytes := fastSearchSniffBytes()
+	maxMatchesPerFile := fastSearchMaxMatchesPerFile()
+
 	var re *regexp.Regexp
 	if opts.Regex {
 		var err error
@@ -181,7 +187,7 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 		go func() {
 			defer wg.Done()
 			for path := range paths {
-				fileMatches := searchInFile(path, opts.Query, queryLower, re)
+				fileMatches := searchInFile(path, opts.Query, queryLower, re, maxLineBytes, sniffBytes, maxMatchesPerFile)
 				if len(fileMatches) > 0 {
 					mu.Lock()
 					if len(matches) < opts.Limit {
@@ -217,6 +223,10 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 			return filepath.SkipAll
 		}
 
+		if maxFileBytes > 0 && info.Size() > maxFileBytes {
+			return nil
+		}
+
 		paths <- path
 		return nil
 	})
@@ -227,7 +237,7 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 	return matches
 }
 
-func searchInFile(path string, query string, queryLower string, re *regexp.Regexp) []SearchMatch {
+func searchInFile(path string, query string, queryLower string, re *regexp.Regexp, maxLineBytes int, sniffBytes int, maxMatches int) []SearchMatch {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -235,7 +245,18 @@ func searchInFile(path string, query string, queryLower string, re *regexp.Regex
 	defer f.Close()
 
 	var matches []SearchMatch
-	scanner := bufio.NewScanner(f)
+	reader := bufio.NewReader(f)
+	if sniffBytes > 0 {
+		sample, _ := reader.Peek(sniffBytes)
+		if bytes.IndexByte(sample, 0) != -1 {
+			return nil
+		}
+	}
+	scanner := bufio.NewScanner(reader)
+	if maxLineBytes > 0 {
+		bufSize := minInt(64*1024, maxLineBytes)
+		scanner.Buffer(make([]byte, 0, bufSize), maxLineBytes)
+	}
 	lineNum := 1
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -254,7 +275,7 @@ func searchInFile(path string, query string, queryLower string, re *regexp.Regex
 			})
 		}
 		lineNum++
-		if len(matches) > 100 { // limit per file
+		if maxMatches > 0 && len(matches) >= maxMatches {
 			break
 		}
 	}
