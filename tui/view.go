@@ -36,6 +36,7 @@ var (
 	kindWarnStyle      = warnStyle.Copy()
 	kindErrorStyle     = errorStyle.Copy()
 	kindActivityStyle  = mutedStyle.Copy()
+	kindThinkingStyle  = accentStyle.Copy().Italic(true)
 )
 
 func (m *model) View() tea.View {
@@ -344,6 +345,12 @@ func (m model) renderFooter() string {
 		statusLine += " · tool details: on"
 	} else {
 		statusLine += " · tool details: off"
+	}
+	if m.turnReasoning != "" {
+		statusLine += " · reasoning: " + m.turnReasoning
+	}
+	if m.turnPhase != "" {
+		statusLine += " · phase: " + m.turnPhase
 	}
 
 	footerLeft := "/help · /undo · PgUp/PgDn scroll · Ctrl+T tool details · Ctrl+C pause · Ctrl+D exit"
@@ -770,10 +777,11 @@ func (m *model) renderModal() string {
 	case ModalPause:
 		wrapWidth := m.modalContentWidth()
 		content = lipgloss.JoinVertical(lipgloss.Left,
-			accentStyle.Render("Paused"),
+			accentStyle.Render("Stopping Current Turn"),
 			"",
-			wrapText("Press Ctrl+C again to resume.", wrapWidth),
-			wrapText("Press Ctrl+D to exit.", wrapWidth),
+			wrapText("Vetala is interrupting the active model or tool call.", wrapWidth),
+			"",
+			wrapText("The refinement prompt will appear once the backend yields control.", wrapWidth),
 		)
 	case ModalSelect:
 		var items []string
@@ -879,6 +887,8 @@ func kindMutedStyle(kind string) lipgloss.Style {
 		return kindErrorStyle
 	case "activity":
 		return kindActivityStyle
+	case "thinking":
+		return kindThinkingStyle
 	default:
 		return mutedStyle
 	}
@@ -888,6 +898,8 @@ func kindLabel(kind string) string {
 	switch kind {
 	case "activity":
 		return "doing"
+	case "thinking":
+		return "thinking"
 	default:
 		return kind
 	}

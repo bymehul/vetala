@@ -1,5 +1,6 @@
 import { ApprovalManager } from "./approvals.js";
 import { compactConversation } from "./context-memory.js";
+import { analyzeTurnDeliberation, phaseForTool } from "./deliberation.js";
 import { loadMemoriesPrompt, loadRulesPrompt } from "./context-files.js";
 import { appendHistoryEntry } from "./history-store.js";
 import { PathPolicy } from "./path-policy.js";
@@ -58,6 +59,9 @@ export class Agent {
   private activeTurnController: AbortController | null = null;
   private stopRequested = false;
   private turnSkillPrompt: string | null = null;
+  private turnDeliberationPrompt: string | null = null;
+  private turnReasoningEffort: "low" | "medium" | "high" | null = null;
+  private turnReasoningLabel = "none";
 
   constructor(private readonly options: AgentOptions) {
     this.client = createProviderClient(options.config.providers[options.session.provider]);
@@ -102,6 +106,17 @@ export class Agent {
 
       const provider = this.options.config.providers[this.options.session.provider];
       const providerDefinition = getProviderDefinition(this.options.session.provider);
+      const deliberation = analyzeTurnDeliberation(userInput, {
+        configuredEffort: providerDefinition.supportsReasoningEffort ? this.options.config.reasoningEffort : null,
+        activeSkills: turnSkillContext.labels
+      });
+      this.turnDeliberationPrompt = deliberation.guidance;
+      this.turnReasoningEffort = providerDefinition.supportsReasoningEffort ? deliberation.reasoningEffort : null;
+      this.turnReasoningLabel = deliberation.reasoningLabel;
+      this.options.ui.updateTurnState(this.turnReasoningLabel, "planning");
+      if (deliberation.shouldShowThinking && deliberation.thinkingSummary) {
+        this.options.ui.printThinking(deliberation.thinkingSummary);
+      }
 
       if (!provider.authValue) {
         const missingAuthMessage =
@@ -258,11 +273,20 @@ export class Agent {
             };
           } else {
             seenToolCalls.add(signature);
+            this.options.ui.updateTurnState(this.turnReasoningLabel, phaseForTool(toolCall.function.name));
             this.options.ui.activity(`Running ${toolCall.function.name}.`);
             const toolSpec = this.options.tools.getTool(toolCall.function.name);
             const isMutating = toolSpec && !toolSpec.readOnly;
 
-            result = await this.options.tools.execute(toolCall, this.toolContext(turnController));
+            try {
+              result = await this.options.tools.execute(toolCall, this.toolContext(turnController));
+            } catch (error) {
+              if (isAbortError(error) || error instanceof AgentInterruptedError) {
+                this.options.ui.endAssistantTurn();
+                throw new AgentInterruptedError();
+              }
+              throw error;
+            }
 
             if (result.isError) {
               seenToolCalls.delete(signature);
@@ -291,17 +315,23 @@ export class Agent {
           });
           await this.options.sessionStore.appendMessage(this.options.session, warning);
         }
+        this.options.ui.updateTurnState(this.turnReasoningLabel, "thinking");
       }
     } finally {
       if (this.activeTurnController === turnController) {
         this.activeTurnController = null;
       }
       this.turnSkillPrompt = null;
+      this.turnDeliberationPrompt = null;
+      this.turnReasoningEffort = null;
+      this.turnReasoningLabel = "none";
+      this.options.ui.updateTurnState(null, null);
     }
   }
 
   private async completeTurn(messages: ChatMessage[], streaming: boolean): Promise<StreamedAssistantTurn> {
-    this.options.ui.activity(`Thinking with ${providerLabel(this.options.session.provider)} / ${this.options.session.model}.`);
+    this.options.ui.updateTurnState(this.turnReasoningLabel, "thinking");
+    this.options.ui.activity(`Thinking with ${providerLabel(this.options.session.provider)} / ${this.options.session.model} (${this.turnReasoningLabel} reasoning).`);
     const requestOptions = this.beginRequest();
 
     if (!streaming) {
@@ -366,7 +396,7 @@ export class Agent {
       model: this.options.session.model,
       temperature: 0.2,
       reasoning_effort: getProviderDefinition(this.options.session.provider).supportsReasoningEffort
-        ? this.options.config.reasoningEffort
+        ? this.turnReasoningEffort
         : null,
       tools: this.options.tools.toSarvamTools(),
       tool_choice: "auto" as const
@@ -469,6 +499,8 @@ export class Agent {
       "When using tools, emit valid JSON object arguments only.",
       "Prefer smaller tool calls over giant payloads. Break large refactors and large apply_patch edits into multiple steps.",
       "When the user names a concrete file path, read that file directly with read_file or read_file_chunk before considering search_repo.",
+      "For non-trivial tasks, form a concise plan before acting and execute it incrementally.",
+      "If the target, scope, or acceptance criteria remain unclear after initial inspection, use ask_user before editing.",
       "For Git-aware tasks, prefer the dedicated git tools over ad-hoc shell commands.",
       "For change review, start with git_review targeting the full worktree so you cover staged, unstaged, and untracked files.",
       "For branch review, compare against the merge base with the requested base branch instead of assuming HEAD~1 or the previous commit.",
@@ -487,6 +519,10 @@ export class Agent {
 
     if (this.turnSkillPrompt) {
       lines.push("", this.turnSkillPrompt);
+    }
+
+    if (this.turnDeliberationPrompt) {
+      lines.push("", this.turnDeliberationPrompt);
     }
 
     if (persistentMemory) {

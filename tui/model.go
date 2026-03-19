@@ -41,12 +41,14 @@ type model struct {
 	height int
 
 	// IPC State
-	dashboard   DashboardData
-	status      string
-	ready       bool
-	running     bool
-	trusted     bool
-	skillLabels []string
+	dashboard     DashboardData
+	status        string
+	ready         bool
+	running       bool
+	trusted       bool
+	skillLabels   []string
+	turnReasoning string
+	turnPhase     string
 
 	// Components
 	viewport viewport.Model
@@ -194,6 +196,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// If running, send interrupt to pause the agent and trigger refinement prompt.
 			// Otherwise, clear the current input to avoid accidental exits. Use Ctrl+D to exit.
 			if m.running {
+				m.modalState = ModalPause
+				m.status = "Stopping current turn"
 				sendInterrupt(m.backendWriter)
 			} else {
 				m.textArea.SetValue("")
@@ -367,11 +371,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.status != "Running agent" && m.status != "Stopping current turn" && m.status != "Running queued prompt" {
 			m.running = false
 			m.activity = nil
+			if m.modalState == ModalPause {
+				m.modalState = ModalNone
+			}
 		}
 		m.transcriptDirty = true
 
 	case MsgSkills:
 		m.skillLabels = append([]string(nil), msg...)
+		m.dashboardDirty = true
+		m.transcriptDirty = true
+
+	case MsgTurnState:
+		m.turnReasoning = msg.Reasoning
+		m.turnPhase = msg.Phase
 		m.dashboardDirty = true
 		m.transcriptDirty = true
 

@@ -5,10 +5,10 @@ import type { Ora } from "ora";
 
 type IpcTag =
     | "ready" | "entry" | "chunk" | "flush" | "discard" | "skills"
-    | "activity" | "spinner" | "status"
+    | "activity" | "spinner" | "status" | "turn_state"
     | "prompt" | "clear";
 
-type EntryKind = "user" | "assistant" | "tool" | "info" | "warn" | "error" | "activity";
+type EntryKind = "user" | "assistant" | "tool" | "info" | "warn" | "error" | "activity" | "thinking";
 
 function sendIPC(tag: IpcTag, data: Record<string, unknown> = {}): void {
     const msg = JSON.stringify({ tag, data });
@@ -55,6 +55,10 @@ export class IpcTerminalUI extends TerminalUI {
 
     override warn(message: string): void {
         sendIPC("entry", { kind: "warn", text: message });
+    }
+
+    override printThinking(message: string): void {
+        sendIPC("entry", { kind: "thinking", text: message });
     }
 
     override error(message: string): void {
@@ -107,6 +111,10 @@ export class IpcTerminalUI extends TerminalUI {
 
     override updateActiveSkills(skills: string[]): void {
         sendIPC("skills", { skills });
+    }
+
+    override updateTurnState(reasoning: string | null, phase: string | null): void {
+        sendIPC("turn_state", { reasoning, phase });
     }
 
     override endAssistantTurn(): void {

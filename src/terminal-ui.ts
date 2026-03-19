@@ -105,6 +105,11 @@ export class TerminalUI {
     console.log(chalk.yellow(message));
   }
 
+  printThinking(message: string): void {
+    this.endAssistantTurn();
+    console.log(`${chalk.magenta.italic("thinking")} ${chalk.dim("│")} ${message}`);
+  }
+
   error(message: string): void {
     this.endAssistantTurn();
     console.error(chalk.red(message));
@@ -139,6 +144,11 @@ export class TerminalUI {
 
   updateActiveSkills(skills: string[]): void {
     void skills;
+  }
+
+  updateTurnState(reasoning: string | null, phase: string | null): void {
+    void reasoning;
+    void phase;
   }
 
   endAssistantTurn(): void {

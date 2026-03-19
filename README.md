@@ -27,6 +27,16 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.5.6
+Added:
+- Turn deliberation with dynamic reasoning effort, visible planning/thinking summaries, and live execution phases in the TUI footer.
+- Clarification-first behavior for underspecified edit requests through stronger `ask_user` guidance.
+
+Patched:
+- `Ctrl+C` pause flow now interrupts active tool/model work more reliably and shows an immediate stopping modal.
+- Repo-wide search cancellation now propagates through the TypeScript backend and Go TUI worker path.
+- Non-trivial turns now surface reasoning and phase state more clearly during execution.
+
 ### v0.5.5
 Added:
 - Deterministic skill routing with active-skill visibility in the UI.

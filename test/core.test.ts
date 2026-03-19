@@ -7,6 +7,7 @@ import { partitionToolCalls, sanitizeConversationMessages } from "../src/agent.j
 import { undoLastEdit } from "../src/edit-history.js";
 import { ApprovalManager } from "../src/approvals.js";
 import { compactConversation } from "../src/context-memory.js";
+import { analyzeTurnDeliberation, phaseForTool } from "../src/deliberation.js";
 import { appendHistoryEntry } from "../src/history-store.js";
 import {
   clearSavedAuth,
@@ -197,7 +198,7 @@ test("Package metadata stays in sync with the bundled TUI launcher", async () =>
     files?: string[];
   };
 
-  assert.equal(pkg.version, "0.5.5");
+  assert.equal(pkg.version, "0.5.6");
   assert.deepEqual(
     EXPECTED_TUI_FILES.filter((filePath) => !pkg.files?.includes(filePath)),
     []
@@ -485,6 +486,32 @@ test("Conversation compaction keeps recent messages and summarizes older context
   assert.equal(compacted.recentMessages[0]?.content, "message 4");
   assert.match(compacted.memory ?? "", /4 earlier messages compacted/);
   assert.match(compacted.memory ?? "", /Referenced files: \/tmp\/app\.ts, \/tmp\/agent\.ts/);
+});
+
+test("analyzeTurnDeliberation raises reasoning for non-trivial review tasks", () => {
+  const deliberation = analyzeTurnDeliberation(
+    "review test-react/App.tsx for regressions, edge cases, and missing tests",
+    { configuredEffort: null, activeSkills: ["react-best-practices (auto)"] }
+  );
+
+  assert.equal(deliberation.reasoningEffort, "high");
+  assert.equal(deliberation.reasoningLabel, "high");
+  assert.equal(deliberation.shouldShowThinking, true);
+  assert.match(deliberation.thinkingSummary ?? "", /inspect test-react\/App\.tsx/i);
+});
+
+test("analyzeTurnDeliberation prefers clarification guidance for ambiguous edit requests", () => {
+  const deliberation = analyzeTurnDeliberation("improve this", { configuredEffort: null });
+
+  assert.equal(deliberation.reasoningEffort, "medium");
+  assert.match(deliberation.guidance ?? "", /ask_user/i);
+  assert.match(deliberation.thinkingSummary ?? "", /clarifying question/i);
+});
+
+test("phaseForTool maps core tools into codex-like execution phases", () => {
+  assert.equal(phaseForTool("read_file"), "inspecting");
+  assert.equal(phaseForTool("apply_patch"), "editing");
+  assert.equal(phaseForTool("ask_user"), "clarifying");
 });
 
 test("partitionToolCalls rejects malformed apply_patch arguments before execution", () => {

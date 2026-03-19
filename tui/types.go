@@ -44,6 +44,11 @@ type SkillsData struct {
 	Skills []string `json:"skills"`
 }
 
+type TurnStateData struct {
+	Reasoning string `json:"reasoning"`
+	Phase     string `json:"phase"`
+}
+
 type PromptData struct {
 	PromptType string `json:"promptType"`
 	// varying fields based on PromptType
@@ -80,6 +85,7 @@ type MsgActivity string
 type MsgSpinner struct{ Label *string }
 type MsgStatus string
 type MsgSkills []string
+type MsgTurnState TurnStateData
 type MsgPromptTrust string    // workspace
 type MsgPromptApproval string // label
 type MsgPromptExit struct{}

@@ -208,9 +208,14 @@ func TestRenderFooterIncludesActiveSkills(t *testing.T) {
 	m.height = 30
 	m.status = "Ready"
 	m.skillLabels = []string{"code-review (pinned)", "react-vite-guide (auto)"}
+	m.turnReasoning = "high"
+	m.turnPhase = "planning"
 
 	footer := m.renderFooter()
 	if !strings.Contains(footer, "skills: code-review (pinned), react-vite-guide (auto)") {
 		t.Fatalf("expected footer to include active skills, got %q", footer)
+	}
+	if !strings.Contains(footer, "reasoning: high") || !strings.Contains(footer, "phase: planning") {
+		t.Fatalf("expected footer to include turn reasoning and phase, got %q", footer)
 	}
 }
