@@ -73,7 +73,7 @@ const listDirTool: ToolSpec = {
 
 const searchRepoTool: ToolSpec = {
   name: "search_repo",
-  description: "Search the repo for a fixed string and return file:line matches. Use this before reading or editing files.",
+  description: "Search the repo for a fixed string and return file:line matches when you need to discover relevant files. If the user already named a concrete file path, prefer read_file or read_file_chunk.",
   jsonSchema: {
     type: "object",
     properties: {
@@ -101,6 +101,10 @@ const searchRepoTool: ToolSpec = {
         type: "array",
         items: { type: "string" },
         description: "Optional glob filters to limit the search, for example `src/**/*.ts`."
+      },
+      includeHidden: {
+        type: "boolean",
+        description: "If true, include hidden files and directories like `.github` or `.devcontainer`."
       }
     },
     required: ["query"],
@@ -126,7 +130,7 @@ const searchFilesTool: ToolSpec = {
 
 const readFileTool: ToolSpec = {
   name: "read_file",
-  description: "Read a UTF-8 text file, optionally limiting the output to a line range.",
+  description: "Read a UTF-8 text file, optionally limiting the output to a line range. Use this first when the user already gave you a concrete file path.",
   jsonSchema: {
     type: "object",
     properties: {
@@ -260,6 +264,10 @@ const readSymbolTool: ToolSpec = {
         type: "array",
         items: { type: "string" },
         description: "Optional glob filters to limit the symbol search."
+      },
+      includeHidden: {
+        type: "boolean",
+        description: "If true, include hidden files and directories like `.github` or `.devcontainer`."
       }
     },
     required: ["symbol"],
@@ -278,6 +286,7 @@ const readSymbolTool: ToolSpec = {
       cwd: context.cwd,
       limit,
       globs: stringArray(args.globs),
+      includeHidden: args.includeHidden === true,
       context
     });
 
@@ -676,7 +685,21 @@ const deleteFileTool: ToolSpec = {
 };
 
 async function executeSearchTool(args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
+  context.lifecycle.throwIfAborted();
   const query = requiredString(args.query, "query");
+  const directTarget = await resolveDirectReadTarget(query, context);
+  if (directTarget) {
+    return {
+      summary: `Query resolves to file ${directTarget}`,
+      content: [
+        `The query "${query}" resolves to an existing file path.`,
+        `Use read_file or read_file_chunk for ${directTarget} instead of scanning the repo.`
+      ].join("\n"),
+      isError: false,
+      referencedFiles: [directTarget]
+    };
+  }
+
   const target = await context.paths.ensureReadable(stringOrDefault(args.path, "."));
   const limit = clampInteger(integerOrDefault(args.limit, DEFAULT_SEARCH_LIMIT), 1, 200);
   const matches = await searchRepo({
@@ -687,6 +710,7 @@ async function executeSearchTool(args: Record<string, unknown>, context: ToolCon
     mode: args.mode === "regex" ? "regex" : "fixed",
     caseSensitive: args.caseSensitive === true,
     globs: stringArray(args.globs),
+    includeHidden: args.includeHidden === true,
     context
   });
 
@@ -945,4 +969,43 @@ function summarizeDiffOps(beforeLines: string[], afterLines: string[]): { added:
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0) : [];
+}
+
+async function resolveDirectReadTarget(query: string, context: ToolContext): Promise<string | null> {
+  const trimmed = query.trim();
+  if (!looksLikeFilePathQuery(trimmed)) {
+    return null;
+  }
+
+  const resolved = context.paths.resolve(trimmed);
+  if (!isWithinAllowedRoots(resolved, context.paths.allowedRoots())) {
+    return null;
+  }
+
+  if (!await existsPath(resolved)) {
+    return null;
+  }
+
+  const targetStats = await stat(resolved);
+  return targetStats.isFile() ? resolved : null;
+}
+
+function looksLikeFilePathQuery(value: string): boolean {
+  if (!value || /\s/.test(value) || value.includes("*") || value.includes("?")) {
+    return false;
+  }
+
+  if (/[\\\/]/.test(value)) {
+    return true;
+  }
+
+  return path.extname(value) !== "";
+}
+
+function isWithinAllowedRoots(target: string, roots: string[]): boolean {
+  return roots.some((root) => {
+    const normalizedRoot = path.resolve(root);
+    const rootPrefix = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
+    return target === normalizedRoot || target.startsWith(rootPrefix);
+  });
 }

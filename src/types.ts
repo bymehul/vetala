@@ -302,6 +302,10 @@ export interface SearchProvider {
 export interface ToolContext {
   cwd: string;
   workspaceRoot: string;
+  lifecycle: {
+    signal: AbortSignal;
+    throwIfAborted(): void;
+  };
   approvals: {
     requestApproval(request: ApprovalRequest): Promise<boolean>;
     hasSessionGrant(key: string): boolean;
@@ -314,7 +318,11 @@ export interface ToolContext {
   };
   performance: {
     computeDiff(before: string, after: string): Promise<string | null>;
-    fastSearch(query: string, root: string, options?: { limit?: number; regex?: boolean }): Promise<any[] | null>;
+    fastSearch(
+      query: string,
+      root: string,
+      options?: { limit?: number; regex?: boolean; globs?: string[]; includeHidden?: boolean; signal?: AbortSignal }
+    ): Promise<any[] | null>;
   };
   reads: {
     hasRead(path: string): boolean;

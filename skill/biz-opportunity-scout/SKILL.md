@@ -1,6 +1,23 @@
 ---
 name: biz-opportunity-scout
 description: Identify and validate profitable business opportunities by analyzing market size (TAM/SAM/SOM), unit economics, competitive landscape, and PMF indicators. Generates comprehensive HTML reports with opportunity scorecards.
+keywords:
+  - business opportunity
+  - tam
+  - sam
+  - som
+  - unit economics
+  - product market fit
+  - pmf
+task_types:
+  - market research
+  - business analysis
+  - opportunity validation
+path_globs:
+  - report/**/*.html
+  - reports/**/*.html
+priority: 3
+auto_apply: true
 ---
 
 # Biz Opportunity Scout

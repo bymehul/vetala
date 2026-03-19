@@ -7,6 +7,7 @@ import { PathPolicy } from "./path-policy.js";
 import { SessionStore } from "./session-store.js";
 import { SkillRuntime } from "./skills/runtime.js";
 import { createToolRegistry } from "./tools/index.js";
+import { buildGitReviewReport, resolveGitBaseBranch } from "./tools/git.js";
 import { createSearchProvider } from "./search-provider.js";
 import { detectRuntimeHostProfile } from "./runtime-profile.js";
 import { startMemoriesPipeline } from "./memories/pipeline.js";
@@ -15,6 +16,16 @@ import type { ApprovalRequest, ApprovalScope, PersistedMessage, SessionState } f
 interface IpcCommand {
     tag: string;
     data?: Record<string, unknown>;
+}
+
+interface PendingSearchRequest {
+    resolve: (matches: any[] | null) => void;
+}
+
+function createAbortError(): Error {
+    const error = new Error("The operation was aborted.");
+    error.name = "AbortError";
+    return error;
 }
 
 async function main(): Promise<void> {
@@ -66,6 +77,11 @@ async function main(): Promise<void> {
         ui.sendReady(s, isLoggedIn);
     };
 
+    const refreshSkillState = async () => {
+        const pinned = await skills.pinnedSkills();
+        ui.updateActiveSkills(pinned.map((skill) => `${skill.name} (pinned)`));
+    };
+
     const collectResumePreview = (messages: PersistedMessage[], limit: number): PersistedMessage[] => {
         const filtered = messages.filter((message) => {
             if (message.role !== "user" && message.role !== "assistant") {
@@ -110,7 +126,7 @@ async function main(): Promise<void> {
     const pendingSelects = new Map<string, (index: number) => void>();
     const pendingInputs = new Map<string, (value: string) => void>();
     const pendingDiffs = new Map<string, (diff: string) => void>();
-    const pendingSearches = new Map<string, (matches: any[]) => void>();
+    const pendingSearches = new Map<string, PendingSearchRequest>();
 
     const requestApprovalDecision = (request: ApprovalRequest): Promise<ApprovalScope> => {
         return new Promise<ApprovalScope>((resolve) => {
@@ -175,10 +191,39 @@ async function main(): Promise<void> {
         });
     };
 
-    const fastSearch = (query: string, root: string, opts?: { limit?: number; regex?: boolean }): Promise<any[] | null> => {
-        return new Promise((resolve) => {
+    const fastSearch = (
+        query: string,
+        root: string,
+        opts?: { limit?: number; regex?: boolean; globs?: string[]; includeHidden?: boolean; signal?: AbortSignal }
+    ): Promise<any[] | null> => {
+        return new Promise((resolve, reject) => {
             const id = Math.random().toString();
-            pendingSearches.set(id, resolve);
+            const finalize = () => {
+                pendingSearches.delete(id);
+                opts?.signal?.removeEventListener("abort", onAbort);
+            };
+
+            const onAbort = () => {
+                finalize();
+                process.stdout.write(JSON.stringify({
+                    tag: "cancel_search",
+                    data: { id }
+                }) + "\n");
+                reject(createAbortError());
+            };
+
+            if (opts?.signal?.aborted) {
+                onAbort();
+                return;
+            }
+
+            pendingSearches.set(id, {
+                resolve: (matches) => {
+                    finalize();
+                    resolve(matches);
+                },
+            });
+            opts?.signal?.addEventListener("abort", onAbort, { once: true });
             process.stdout.write(JSON.stringify({
                 tag: "fast_search",
                 data: {
@@ -186,7 +231,9 @@ async function main(): Promise<void> {
                     query,
                     root,
                     limit: opts?.limit ?? 100,
-                    regex: opts?.regex ?? false
+                    regex: opts?.regex ?? false,
+                    globs: opts?.globs ?? [],
+                    includeHidden: opts?.includeHidden ?? false
                 }
             }) + "\n");
         });
@@ -419,16 +466,61 @@ async function main(): Promise<void> {
 
     const handleCommand = async (commandLine: string): Promise<void> => {
         const [command, ...args] = commandLine.slice(1).split(/\s+/);
+        const rest = args.join(" ").trim();
 
         switch (command) {
             case "help":
                 ui.info([
-                    "/help", "/model", "/undo", "/skill", "/tools",
+                    "/help", "/diff [base-branch]", "/review [base-branch]", "/model", "/undo", "/skill", "/tools",
                     "/history", "/resume [latest|index|id]", "/resume list", "/new",
                     "/approve", "/config", "/logout", "/clear", "/exit"
                 ].join("\n"));
                 ui.sendStatus("Ready");
                 break;
+            case "diff": {
+                const report = await buildGitReviewReport({
+                    cwd: session.workspaceRoot,
+                    target: rest ? "base_branch" : "worktree",
+                    ...(rest ? { baseBranch: rest } : {}),
+                    includeUntracked: true
+                });
+                if (report.isError) {
+                    ui.warn(report.content);
+                } else {
+                    ui.info(report.content);
+                }
+                ui.sendStatus("Ready");
+                break;
+            }
+            case "review": {
+                const reviewPrompt = await (async () => {
+                    if (!rest) {
+                        return [
+                            "Review the current code changes (staged, unstaged, and untracked files).",
+                            "Start by using git_review with target \"worktree\".",
+                            "Provide prioritized, actionable findings with the highest-risk issues first."
+                        ].join(" ");
+                    }
+
+                    const base = await resolveGitBaseBranch(session.workspaceRoot, rest);
+                    if (base.mergeBaseSha) {
+                        return [
+                            `Review the code changes against the base branch \"${base.requestedBranch}\".`,
+                            `The merge base commit for this comparison is ${base.mergeBaseSha}.`,
+                            `Start by using git_review with target \"base_branch\" and baseBranch \"${base.requestedBranch}\".`,
+                            "Provide prioritized, actionable findings with the highest-risk issues first."
+                        ].join(" ");
+                    }
+
+                    return [
+                        `Review the code changes against the base branch \"${rest}\".`,
+                        `Start by using git_review with target \"base_branch\" and baseBranch \"${rest}\".`,
+                        "Provide prioritized, actionable findings with the highest-risk issues first."
+                    ].join(" ");
+                })();
+                await runPrompt(reviewPrompt);
+                break;
+            }
             case "clear":
                 ui.sendClear();
                 ui.sendStatus("Ready");
@@ -466,6 +558,10 @@ async function main(): Promise<void> {
                 const context = {
                     cwd: process.cwd(),
                     workspaceRoot: session.workspaceRoot,
+                    lifecycle: {
+                        signal: new AbortController().signal,
+                        throwIfAborted: () => { }
+                    },
                     approvals: {
                         requestApproval: (request: ApprovalRequest) => approvals.requestApproval(request),
                         hasSessionGrant: (key: string) => approvals.hasSessionGrant(key),
@@ -507,7 +603,7 @@ async function main(): Promise<void> {
                     const pinned = new Set((await skills.pinnedSkills()).map((s) => s.name));
                     ui.info(
                         available.length > 0
-                            ? available.map((s) => `${pinned.has(s.name) ? "*" : "-"} ${s.name} - ${s.description}`).join("\n")
+                            ? available.map((s) => `${pinned.has(s.name) ? "*" : "-"} ${s.name} ${s.routing.autoApply ? "[auto]" : "[manual]"} - ${s.description}`).join("\n")
                             : "(no skills available)"
                     );
                     ui.sendStatus("Ready");
@@ -518,13 +614,16 @@ async function main(): Promise<void> {
                     if (!rest[0]) { ui.warn("Usage: /skill use <name>"); break; }
                     const skill = await skills.pinSkill(rest[0]);
                     ui.info(`Pinned skill: ${skill.name}`);
+                    await refreshSkillState();
                 } else if (sub === "drop" || sub === "unpin") {
                     if (!rest[0]) { ui.warn("Usage: /skill drop <name>"); break; }
                     const skill = await skills.unpinSkill(rest[0]);
                     ui.info(`Unpinned skill: ${skill.name}`);
+                    await refreshSkillState();
                 } else if (sub === "clear") {
                     const cleared = await skills.clearPinnedSkills();
                     ui.info(`Cleared ${cleared} pinned skills.`);
+                    await refreshSkillState();
                 }
                 ui.sendStatus("Ready");
                 break;
@@ -571,6 +670,7 @@ async function main(): Promise<void> {
                             ui.sendClear();
                             ui.sendStatus(`Resumed ${session.id.slice(0, 8)}`);
                             sendReady(session);
+                            await refreshSkillState();
                             sendResumePreview(session);
                             ui.sendStatus("Ready");
                         }
@@ -593,6 +693,7 @@ async function main(): Promise<void> {
                     ui.sendClear();
                     ui.sendStatus(`Resumed ${session.id.slice(0, 8)}`);
                     sendReady(session);
+                    await refreshSkillState();
                     sendResumePreview(session);
                 }
                 ui.sendStatus("Ready");
@@ -603,6 +704,7 @@ async function main(): Promise<void> {
                 ui.sendClear();
                 ui.sendStatus(`Created ${session.id.slice(0, 8)}`);
                 sendReady(session);
+                await refreshSkillState();
                 break;
             }
             case "approve":
@@ -737,10 +839,9 @@ async function main(): Promise<void> {
             case "searchResult":
                 if (cmd.data?.id && Array.isArray(cmd.data.matches)) {
                     const id = cmd.data.id as string;
-                    const resolve = pendingSearches.get(id);
-                    if (resolve) {
-                        pendingSearches.delete(id);
-                        resolve(cmd.data.matches);
+                    const pending = pendingSearches.get(id);
+                    if (pending) {
+                        pending.resolve(cmd.data.matches);
                     }
                 }
                 break;
@@ -758,6 +859,7 @@ async function main(): Promise<void> {
 
     // Send the initial ready message with dashboard data
     sendReady(session);
+    await refreshSkillState();
     if (!isNewSession) {
         sendResumePreview(session);
     }

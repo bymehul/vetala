@@ -1,6 +1,19 @@
 ---
 name: agents-md-generator
 description: Analyze repository structure and generate or update standardized AGENTS.md files that serve as contributor guides for AI agents. Supports both single-repo and monorepo structures. Measures LOC to determine character limits and produces structured documents covering overview, folder structure, patterns, conventions, and working agreements. Update mode refreshes only the standard sections while preserving user-defined custom sections. Use when setting up a new repository, onboarding AI agents to an existing codebase, updating an existing AGENTS.md, or when the user mentions AGENTS.md.
+keywords:
+  - agents.md
+  - agent instructions
+  - repo instructions
+  - contributor guide
+task_types:
+  - repository documentation
+  - agent onboarding
+path_globs:
+  - AGENTS.md
+  - **/AGENTS.md
+priority: 4
+auto_apply: true
 ---
 
 # AGENTS.md Generation Capability

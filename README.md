@@ -27,55 +27,15 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
-### v0.5.4
+### v0.5.5
 Added:
-- Copy last reply action (Ctrl+Y) with a compact inline affordance after assistant replies.
-- Resume picker preview tuning and option line wrapping for tighter terminals.
+- Deterministic skill routing with active-skill visibility in the UI.
+- Git-aware review flow upgrades with dedicated `/diff` and `/review` entry points.
 
 Patched:
-- Repeat-tool warning injection with configurable threshold/message.
-- Empty-response warning when a model returns no content (env-tunable).
-- Default mouse mode enables in-app scroll wheel; can be disabled for terminal selection.
-
-### v0.5.3
-Added:
-- UI refresh: left-aligned layout with minimal framing.
-- Viewport-backed transcript with in-app scrollback (PgUp/PgDn + mouse wheel in-app mode).
-- Dynamic input bar with background styling and auto-resize.
-- UI hints + tool details toggle (Ctrl+T) plus env-tunable UI controls (mouse mode, alt screen, limits).
-
-Patched:
-- Buffered output while modals are open to prevent UI jumps.
-- Live preview rendering is capped and separated from the transcript during streaming.
-- Cached Glamour renderer per theme/width to cut render cost.
-- Fast search skips binaries/oversized files and handles long lines safely.
-
-### v0.5.2
-Added:
-- `/resume` now skips empty sessions and previews the last few messages when resuming.
-- Workspace auto-resume uses the most recent non-empty session.
-
-Patched:
-- Resume selection list starts at the top and scrolls cleanly for longer lists.
-- Modal transitions no longer leave duplicate empty boxes.
-
-### v0.5.1
-Added:
-- New data layout: `memories/`, `rules/`, `snapshots/`, `logs/`, `tasks/`, and `history.jsonl`.
-- Background memory pipeline that writes `raw_memories.md`, rollout summaries, and a consolidated `MEMORY.md`.
-- Configurable memory/context/history limits (visible in `/config`).
-- Update notifier inside the TUI flow with “update now” or “skip for 24 hours”.
-
-Patched:
-- Update checks now run before the TUI trust prompt (and won’t duplicate when launched from the CLI).
-- History persistence trims safely to the configured size cap.
-
-### v0.5.0
-- **bugfix**: major bug fixes and performance improvements
-- **Universal Syntax Diagnostics**: Replaced the Python-only `compileall` fallback in `get_diagnostics` with `web-tree-sitter`. Vetala can now perform syntax checking across multiple languages (TypeScript, Python, Go, Rust, C, C++, Java, Ruby) directly in memory, even if you don't have the native compiler installed on your machine!
-- **Data-Driven Language Registry**: Centralized language management and file extension mapping. Adding new language support is now a single object definition.
-- **Smart Two-Tier Checks**: Diagnostics now try native tools first (`npx tsc`, `go build`) for the highest quality errors, and transparently fall back to WASM tree-sitter parsing if the toolchain is missing.
-
+- Malformed tool calls are quarantined before they can poison session history.
+- `Ctrl+C` can now stop active repo search work instead of waiting for long searches to finish.
+- Explicit file-path prompts now steer toward `read_file`/`read_file_chunk` before repo-wide search.
 
 ## Compatibility
 

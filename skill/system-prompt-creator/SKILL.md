@@ -1,6 +1,19 @@
 ---
 name: system-prompt-creator
 description: A skill that analyzes user requirements to generate production-ready system prompts. It determines whether a single or multi-prompt architecture is needed and queries for missing information if requirements are insufficient.
+keywords:
+  - system prompt
+  - prompt engineering
+  - assistant instructions
+  - prompt architecture
+task_types:
+  - prompt engineering
+  - system prompt design
+path_globs:
+  - prompts/**
+  - **/*.md
+priority: 4
+auto_apply: true
 ---
 
 # System Prompt Creator

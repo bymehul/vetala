@@ -3,16 +3,11 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { runExecFile } from "../process-utils.js";
 import type { ToolContext } from "../types.js";
 
-const SKIP_DIRECTORIES = new Set([
+const ALWAYS_SKIP_DIRECTORIES = new Set([
   ".git",
   ".hg",
   ".svn",
-  ".idea",
-  ".vscode",
-  "node_modules",
-  "dist",
-  "build",
-  "coverage"
+  "node_modules"
 ]);
 
 export interface RepoSearchMatch {
@@ -29,6 +24,7 @@ export interface RepoSearchOptions {
   mode?: "fixed" | "regex";
   caseSensitive?: boolean;
   globs?: string[];
+  includeHidden?: boolean;
   context?: ToolContext;
 }
 
@@ -38,11 +34,14 @@ export interface RepoSymbolSearchOptions {
   cwd: string;
   limit: number;
   globs?: string[];
+  includeHidden?: boolean;
   context?: ToolContext;
 }
 
 export async function searchRepo(options: RepoSearchOptions): Promise<RepoSearchMatch[]> {
   const globs = options.globs?.filter((value) => value.length > 0) ?? [];
+  const signal = options.context?.lifecycle.signal;
+  options.context?.lifecycle.throwIfAborted();
 
   try {
     const result = await runExecFile(
@@ -53,12 +52,16 @@ export async function searchRepo(options: RepoSearchOptions): Promise<RepoSearch
       }),
       {
         cwd: options.cwd,
-        noPty: true
+        noPty: true,
+        ...(signal ? { signal } : {})
       }
     );
 
     return parseSearchMatches(`${result.stdout}${result.stderr}`, options.limit);
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     if (!isMissingBinary(error)) {
       throw error;
     }
@@ -81,6 +84,7 @@ export async function searchRepoSymbol(options: RepoSymbolSearchOptions): Promis
     mode: "regex",
     caseSensitive: true,
     globs: options.globs ?? [],
+    ...(options.includeHidden === true ? { includeHidden: true } : {}),
     context: options.context as any
   });
 
@@ -111,6 +115,10 @@ function buildRgArgs(options: RepoSearchOptions & { globs: string[] }): string[]
     "--glob",
     "!node_modules/"
   ];
+
+  if (shouldIncludeHiddenSearch(options)) {
+    args.push("--hidden");
+  }
 
   if (options.mode !== "regex") {
     args.push("--fixed-strings");
@@ -155,11 +163,17 @@ function parseSearchMatches(output: string, limit: number): RepoSearchMatch[] {
 }
 
 async function fallbackSearch(options: RepoSearchOptions & { globs: string[]; context?: ToolContext }): Promise<RepoSearchMatch[]> {
+  const includeHidden = shouldIncludeHiddenSearch(options);
+  options.context?.lifecycle.throwIfAborted();
+
   // If we have a performance-capable context, offload to Go backend for speed
   if (options.context?.performance.fastSearch) {
     const goMatches = await options.context.performance.fastSearch(options.query, options.target, {
       limit: options.limit,
-      regex: options.mode === "regex"
+      regex: options.mode === "regex",
+      globs: options.globs,
+      includeHidden,
+      signal: options.context?.lifecycle.signal
     });
     if (goMatches) {
       return goMatches;
@@ -177,6 +191,7 @@ async function fallbackSearch(options: RepoSearchOptions & { globs: string[]; co
   const queue = [options.target];
 
   while (queue.length > 0 && matches.length < options.limit) {
+    options.context?.lifecycle.throwIfAborted();
     const current = queue.shift();
 
     if (!current) {
@@ -190,7 +205,7 @@ async function fallbackSearch(options: RepoSearchOptions & { globs: string[]; co
         break;
       }
 
-      if (entry.isDirectory() && shouldSkipDirectory(entry.name)) {
+      if (entry.isDirectory() && shouldSkipDirectory(entry.name, includeHidden)) {
         continue;
       }
 
@@ -202,6 +217,9 @@ async function fallbackSearch(options: RepoSearchOptions & { globs: string[]; co
       }
 
       if (entry.isFile()) {
+        if (!includeHidden && entry.name.startsWith(".")) {
+          continue;
+        }
         const relativePath = path.relative(options.target, entryPath);
         const isMatch = matchesGlob(relativePath, options.globs);
         if (isMatch) {
@@ -220,6 +238,7 @@ async function searchFile(
   matches: RepoSearchMatch[]
 ): Promise<void> {
   try {
+    options.context?.lifecycle.throwIfAborted();
     const content = await readFile(filePath);
 
     if (content.includes(0)) {
@@ -231,6 +250,9 @@ async function searchFile(
     const matcher = buildMatcher(options);
 
     for (const [index, line] of lines.entries()) {
+      if (index % 200 === 0) {
+        options.context?.lifecycle.throwIfAborted();
+      }
       if (!matcher(line)) {
         continue;
       }
@@ -245,7 +267,10 @@ async function searchFile(
         return;
       }
     }
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     // Skip unreadable files in the fallback path.
   }
 }
@@ -264,8 +289,18 @@ function buildMatcher(options: RepoSearchOptions): (line: string) => boolean {
   };
 }
 
-function shouldSkipDirectory(name: string): boolean {
-  return name.startsWith(".") || SKIP_DIRECTORIES.has(name);
+function shouldSkipDirectory(name: string, includeHidden: boolean): boolean {
+  return ALWAYS_SKIP_DIRECTORIES.has(name) || (!includeHidden && name.startsWith("."));
+}
+
+function shouldIncludeHiddenSearch(options: { target: string; includeHidden?: boolean }): boolean {
+  return options.includeHidden === true || pathContainsHiddenSegment(options.target);
+}
+
+function pathContainsHiddenSegment(targetPath: string): boolean {
+  return targetPath
+    .split(path.sep)
+    .some((segment) => segment !== "" && segment !== "." && segment !== ".." && segment.startsWith("."));
 }
 
 function scoreSymbolLine(lineText: string, symbol: string): number {
@@ -326,4 +361,8 @@ function escapeRegex(value: string): string {
 
 function isMissingBinary(error: unknown): error is NodeJS.ErrnoException {
   return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

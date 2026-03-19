@@ -347,10 +347,18 @@ func (m model) renderFooter() string {
 	}
 
 	footerLeft := "/help · /undo · PgUp/PgDn scroll · Ctrl+T tool details · Ctrl+C pause · Ctrl+D exit"
-	footerStr := lipgloss.JoinVertical(lipgloss.Left,
-		mutedStyle.Render(footerLeft),
-		mutedStyle.Render(statusLine),
-	)
+	lines := []string{footerLeft}
+	innerWidth := maxInt(1, m.transcriptBoxWidth()-2*uiContainerPadding(m.width))
+	if len(m.skillLabels) > 0 {
+		lines = append(lines, wrapText("skills: "+strings.Join(m.skillLabels, ", "), innerWidth))
+	}
+	lines = append(lines, statusLine)
+
+	rendered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		rendered = append(rendered, mutedStyle.Render(line))
+	}
+	footerStr := lipgloss.JoinVertical(lipgloss.Left, rendered...)
 	if m.keyDebug && m.lastKeyDebug != "" {
 		footerStr = lipgloss.JoinVertical(lipgloss.Left,
 			footerStr,
@@ -518,21 +526,21 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 			text := entry.Text
 			isLastAssistant := entry.Kind == "assistant" && item.idx == lastAssistantIdx
 
-			if entry.Kind == "tool" {
-				if strings.HasPrefix(text, "↳") {
-					// Tool result - render compactly
-					resultText := strings.TrimPrefix(text, "↳")
-					resultText = strings.TrimSpace(resultText)
+			if resultSummary, resultDetail, ok := parseToolResultText(text); ok && entry.Kind != "user" && entry.Kind != "assistant" {
+				block := style.Render("↳ " + resultSummary)
+				if resultDetail != "" {
 					maxLines := uiToolResultMaxLinesCompact(m.height)
 					if m.showToolDetails {
 						maxLines = uiToolResultMaxLinesExpanded(m.height)
 					}
-					truncated := truncateLines(resultText, maxLines)
-					wrapped := wrapText(truncated, maxInt(1, innerWidth-4))
-					block := mutedStyle.Render(prefixLines(wrapped, "↳ ", "  "))
-					cardContent = append(cardContent, indentLines(block, "  "))
-					continue
+					detail := wrapText(truncateLines(resultDetail, maxLines), maxInt(1, innerWidth-4))
+					block += "\n" + mutedStyle.Render(indentLines(detail, "  "))
 				}
+				cardContent = append(cardContent, indentLines(block, "  "))
+				continue
+			}
+
+			if entry.Kind == "tool" {
 				lines := strings.SplitN(text, "\n", 2)
 				toolHeader := lines[0]
 				if !strings.HasPrefix(toolHeader, "⬢") {
@@ -925,6 +933,20 @@ func promptWrap(text string, width int) string {
 	return lipgloss.NewStyle().Width(width).Render(text)
 }
 
+func parseToolResultText(text string) (string, string, bool) {
+	if !strings.HasPrefix(text, "↳") {
+		return "", "", false
+	}
+	trimmed := strings.TrimSpace(strings.TrimPrefix(text, "↳"))
+	lines := strings.SplitN(trimmed, "\n", 2)
+	summary := strings.TrimSpace(lines[0])
+	detail := ""
+	if len(lines) > 1 {
+		detail = strings.TrimSpace(lines[1])
+	}
+	return summary, detail, true
+}
+
 func truncateLines(text string, maxLines int) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) > maxLines {
@@ -1007,6 +1029,8 @@ type slashSuggestion struct {
 
 var slashCommands = []slashSuggestion{
 	{"help", "/help", "Show known commands"},
+	{"diff", "/diff", "Show current git diff, including untracked files"},
+	{"review", "/review", "Review current changes or compare against a base branch"},
 	{"model", "/model", "Model, reasoning, and auth settings"},
 	{"undo", "/undo", "Revert the last tracked file edit"},
 	{"skill", "/skill", "List, pin, inspect, and read local skills"},

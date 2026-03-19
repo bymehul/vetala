@@ -6,6 +6,21 @@ description:
   designing reusable APIs. Triggers on tasks involving compound components,
   render props, context providers, or component architecture. Includes React 19
   API changes.
+keywords:
+  - composition patterns
+  - compound components
+  - render props
+  - context providers
+  - component architecture
+task_types:
+  - react architecture
+  - component api design
+  - frontend refactor
+path_globs:
+  - **/*.tsx
+  - **/*.jsx
+priority: 3
+auto_apply: true
 ---
 
 # React Composition Patterns

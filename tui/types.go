@@ -40,6 +40,10 @@ type StatusData struct {
 	Text string `json:"text"`
 }
 
+type SkillsData struct {
+	Skills []string `json:"skills"`
+}
+
 type PromptData struct {
 	PromptType string `json:"promptType"`
 	// varying fields based on PromptType
@@ -58,21 +62,24 @@ type MsgComputeDiff struct {
 }
 
 type MsgFastSearch struct {
-	Id     string   `json:"id"`
-	Query  string   `json:"query"`
-	Root   string   `json:"root"`
-	Globs  []string `json:"globs"`
-	Limit  int      `json:"limit"`
-	Regex  bool     `json:"regex"`
+	Id            string   `json:"id"`
+	Query         string   `json:"query"`
+	Root          string   `json:"root"`
+	Globs         []string `json:"globs"`
+	Limit         int      `json:"limit"`
+	Regex         bool     `json:"regex"`
+	IncludeHidden bool     `json:"includeHidden"`
 }
 
 type MsgReady DashboardData
 type MsgEntry EntryData
 type MsgChunk string
 type MsgFlush struct{}
+type MsgDiscardDraft struct{}
 type MsgActivity string
 type MsgSpinner struct{ Label *string }
 type MsgStatus string
+type MsgSkills []string
 type MsgPromptTrust string    // workspace
 type MsgPromptApproval string // label
 type MsgPromptExit struct{}
@@ -121,6 +128,10 @@ type ClientMsgSubmitInput struct {
 type ClientMsgDiffResult struct {
 	Id   string `json:"id"`
 	Diff string `json:"diff"`
+}
+
+type ClientMsgCancelSearch struct {
+	Id string `json:"id"`
 }
 
 type SearchMatch struct {

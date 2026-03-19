@@ -106,7 +106,11 @@ function renderList(
   const pinnedNames = new Set(pinned.map((skill) => skill.name));
   const content = skills.length > 0
     ? skills
-        .map((skill) => `${pinnedNames.has(skill.name) ? "*" : "-"} ${skill.name} - ${skill.description || "(no description)"}`)
+        .map((skill) => {
+          const marker = pinnedNames.has(skill.name) ? "*" : "-";
+          const mode = skill.routing.autoApply ? "[auto]" : "[manual]";
+          return `${marker} ${skill.name} ${mode} - ${skill.description || "(no description)"}`;
+        })
         .join("\n")
     : "(no skills available)";
 

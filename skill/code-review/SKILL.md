@@ -1,6 +1,21 @@
 ---
 name: code-review
 description: Performs production-ready code reviews on git changes. Supports commit/range/file-scoped analysis, impact assessment, breaking-change detection, confidence-aware finding classification, and risk-weighted verdict generation.
+keywords:
+  - code review
+  - review changes
+  - review this diff
+  - find bugs
+  - behavioral regression
+task_types:
+  - code review
+  - git review
+  - change review
+path_globs:
+  - **/*.diff
+  - **/*.patch
+priority: 5
+auto_apply: true
 ---
 
 # Code Review Capabilities

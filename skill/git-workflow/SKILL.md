@@ -1,6 +1,22 @@
 ---
 name: git-workflow
 description: "Use when establishing branching strategies, implementing Conventional Commits, creating or reviewing PRs, resolving PR review comments, merging PRs (including CI verification, auto-merge queues, and post-merge cleanup), managing PR review threads, merging PRs with signed commits, handling merge conflicts, or integrating Git with CI/CD."
+keywords:
+  - git workflow
+  - pull request
+  - pr review
+  - merge conflict
+  - conventional commits
+  - branch strategy
+task_types:
+  - git workflow
+  - pull request
+  - version control
+path_globs:
+  - .github/workflows/**/*.yml
+  - .github/workflows/**/*.yaml
+priority: 4
+auto_apply: true
 ---
 
 # Git Workflow Skill

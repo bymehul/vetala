@@ -1,6 +1,19 @@
 ---
 name: kysely-converter
 description: Capable of converting raw SQL queries into type-safe Kysely TypeScript code. Knows how to handle various SQL dialects and complex query structures.
+keywords:
+  - kysely
+  - convert sql
+  - query builder
+  - type-safe sql
+task_types:
+  - sql conversion
+  - database query conversion
+path_globs:
+  - **/*.sql
+  - **/*.ts
+priority: 4
+auto_apply: true
 ---
 
 # Kysely Converter Capabilities

@@ -20,7 +20,7 @@ const READ_ONLY_COMMANDS = new Set([
   "which"
 ]);
 
-const ALLOWED_GIT_SUBCOMMANDS = new Set(["branch", "diff", "log", "rev-parse", "show", "status"]);
+const ALLOWED_GIT_SUBCOMMANDS = new Set(["blame", "branch", "cat-file", "diff", "log", "ls-files", "merge-base", "rev-parse", "show", "status"]);
 const MAX_SHELL_TIMEOUT_MS = 300_000;
 
 export function createShellTools(): ToolSpec[] {

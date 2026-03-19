@@ -4,7 +4,7 @@ import type { EffectiveConfig, RuntimeHostProfile, SessionState, ToolCall } from
 import type { Ora } from "ora";
 
 type IpcTag =
-    | "ready" | "entry" | "chunk" | "flush"
+    | "ready" | "entry" | "chunk" | "flush" | "discard" | "skills"
     | "activity" | "spinner" | "status"
     | "prompt" | "clear";
 
@@ -101,6 +101,14 @@ export class IpcTerminalUI extends TerminalUI {
         sendIPC("entry", { kind: "assistant", text: message });
     }
 
+    override discardAssistantDraft(): void {
+        sendIPC("discard", {});
+    }
+
+    override updateActiveSkills(skills: string[]): void {
+        sendIPC("skills", { skills });
+    }
+
     override endAssistantTurn(): void {
         sendIPC("flush", {});
     }
@@ -123,11 +131,12 @@ export class IpcTerminalUI extends TerminalUI {
         });
     }
 
-    override printToolResult(summary: string, isError: boolean): void {
+    override printToolResult(summary: string, isError: boolean, detail = ""): void {
+        const trimmedDetail = detail.trim();
         sendIPC("flush", {});
         sendIPC("entry", {
             kind: isError ? "error" : "tool",
-            text: `↳  ${summary}`
+            text: trimmedDetail ? `↳  ${summary}\n${trimmedDetail}` : `↳  ${summary}`
         });
     }
 

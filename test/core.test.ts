@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { mkdtemp, mkdir, readFile as readFsFile, writeFile } from "node:fs/promises";
+import { partitionToolCalls, sanitizeConversationMessages } from "../src/agent.js";
 import { undoLastEdit } from "../src/edit-history.js";
 import { ApprovalManager } from "../src/approvals.js";
 import { compactConversation } from "../src/context-memory.js";
@@ -34,6 +35,7 @@ import {
 import { SessionStore } from "../src/session-store.js";
 import { SkillRuntime } from "../src/skills/runtime.js";
 import type { SkillCatalogEntry } from "../src/skills/types.js";
+import { runExecFile } from "../src/process-utils.js";
 import { createToolRegistry } from "../src/tools/index.js";
 import {
   checkForAppUpdate,
@@ -195,7 +197,7 @@ test("Package metadata stays in sync with the bundled TUI launcher", async () =>
     files?: string[];
   };
 
-  assert.equal(pkg.version, "0.5.4");
+  assert.equal(pkg.version, "0.5.5");
   assert.deepEqual(
     EXPECTED_TUI_FILES.filter((filePath) => !pkg.files?.includes(filePath)),
     []
@@ -485,6 +487,59 @@ test("Conversation compaction keeps recent messages and summarizes older context
   assert.match(compacted.memory ?? "", /Referenced files: \/tmp\/app\.ts, \/tmp\/agent\.ts/);
 });
 
+test("partitionToolCalls rejects malformed apply_patch arguments before execution", () => {
+  const malformed: ToolCall = {
+    id: "apply-patch-1",
+    type: "function",
+    function: {
+      name: "apply_patch",
+      arguments: "{\"path\":\"/tmp/App.tsx\",\"changes\":[{\"search\":\"import { useState }"
+    }
+  };
+  const valid = toolCall("read_file", { path: "/tmp/App.tsx" });
+
+  const partition = partitionToolCalls([valid, malformed]);
+
+  assert.equal(partition.validToolCalls.length, 1);
+  assert.equal(partition.validToolCalls[0]?.function.name, "read_file");
+  assert.equal(partition.invalidToolCalls.length, 1);
+  assert.equal(partition.invalidToolCalls[0]?.toolName, "apply_patch");
+  assert.match(partition.invalidToolCalls[0]?.reason ?? "", /unterminated|unexpected end/i);
+});
+
+test("sanitizeConversationMessages removes malformed assistant tool calls from history", () => {
+  const validCall = toolCall("read_file", { path: "/tmp/App.tsx" });
+  const malformedCall: ToolCall = {
+    id: "apply-patch-1",
+    type: "function",
+    function: {
+      name: "apply_patch",
+      arguments: "{\"path\":\"/tmp/App.tsx\",\"changes\":[{\"search\":\"broken"
+    }
+  };
+
+  const messages = sanitizeConversationMessages<PersistedMessage>([
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [malformedCall],
+      timestamp: "2026-03-19T00:00:00.000Z"
+    },
+    {
+      role: "assistant",
+      content: "I will inspect the file first.",
+      tool_calls: [validCall, malformedCall],
+      timestamp: "2026-03-19T00:00:01.000Z"
+    }
+  ]);
+
+  assert.equal(messages.invalidToolCallCount, 2);
+  assert.equal(messages.messages.length, 1);
+  assert.equal(messages.messages[0]?.content, "I will inspect the file first.");
+  assert.equal(messages.messages[0]?.tool_calls?.length, 1);
+  assert.equal(messages.messages[0]?.tool_calls?.[0]?.function.name, "read_file");
+});
+
 
 
 test("SkillRuntime indexes skills and reads nested files", async () => {
@@ -539,6 +594,146 @@ test("SkillRuntime indexes skills and reads nested files", async () => {
 
       await runtime.pinSkill("demo-skill");
       assert.deepEqual(session.pinnedSkills, ["demo-skill"]);
+    } finally {
+      if (originalSkillRoot === undefined) {
+        delete process.env.VETALA_SKILL_ROOT;
+      } else {
+        process.env.VETALA_SKILL_ROOT = originalSkillRoot;
+      }
+    }
+  });
+});
+
+test("SkillRuntime resolves auto-applied skills from routing metadata and file context", async () => {
+  await withIsolatedXdg(async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "vetala-skill-routing-"));
+    const skillRoot = path.join(tempRoot, "skill");
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "vetala-skill-workspace-"));
+    const originalSkillRoot = process.env.VETALA_SKILL_ROOT;
+
+    await writeSkillFixture(skillRoot, "ui-review", [
+      "name: ui-review",
+      "description: Review UI and accessibility issues in web interfaces.",
+      "keywords:",
+      "  - ui review",
+      "  - accessibility audit",
+      "task_types:",
+      "  - ui review",
+      "  - accessibility review",
+      "path_globs:",
+      "  - src/**/*.tsx",
+      "priority: 4",
+      "auto_apply: true"
+    ], [
+      "# UI Review",
+      "",
+      "## Checklist",
+      "",
+      "See [checklist](references/checklist.md)."
+    ], {
+      "references/checklist.md": "# Checklist\n\nReview contrast, spacing, and semantics.\n"
+    });
+
+    await mkdir(path.join(workspace, "src"), { recursive: true });
+    const filePath = path.join(workspace, "src", "App.tsx");
+    await writeFile(filePath, "export function App() { return <main />; }\n", "utf8");
+
+    process.env.VETALA_SKILL_ROOT = skillRoot;
+
+    try {
+      const store = new SessionStore();
+      const session = await store.createSession(workspace, "sarvam-105b");
+      await store.appendReadFile(session, filePath);
+      const runtime = new SkillRuntime({
+        getSession: () => session,
+        sessionStore: store
+      });
+
+      const context = await runtime.resolveTurnContext("Please do a UI review for accessibility on src/App.tsx");
+
+      assert.equal(context.active.length, 1);
+      assert.equal(context.active[0]?.name, "ui-review");
+      assert.equal(context.active[0]?.source, "auto");
+      assert.ok(context.active[0]?.reasons.some((reason) => reason.startsWith("keyword:")));
+      assert.ok(context.active[0]?.reasons.some((reason) => reason.startsWith("path:")));
+      assert.deepEqual(context.labels, ["ui-review (auto)"]);
+      assert.match(context.prompt ?? "", /ui-review \[auto\]/);
+      assert.match(context.prompt ?? "", /path globs: src\/\*\*\/\*\.tsx/);
+
+      const loaded = await runtime.loadSkill("ui-review");
+      assert.match(loaded.overview, /Auto apply: yes/);
+      assert.match(loaded.overview, /Path globs: src\/\*\*\/\*\.tsx/);
+    } finally {
+      if (originalSkillRoot === undefined) {
+        delete process.env.VETALA_SKILL_ROOT;
+      } else {
+        process.env.VETALA_SKILL_ROOT = originalSkillRoot;
+      }
+    }
+  });
+});
+
+test("SkillRuntime keeps pinned skills ahead of auto-matched skills", async () => {
+  await withIsolatedXdg(async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "vetala-skill-pinned-"));
+    const skillRoot = path.join(tempRoot, "skill");
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "vetala-skill-pinned-workspace-"));
+    const originalSkillRoot = process.env.VETALA_SKILL_ROOT;
+
+    await writeSkillFixture(skillRoot, "manual-guide", [
+      "name: manual-guide",
+      "description: A manually pinned guide that should stay active regardless of the current prompt."
+    ], [
+      "# Manual Guide",
+      "",
+      "## Usage",
+      "",
+      "Pinned-only guidance."
+    ]);
+    await writeSkillFixture(skillRoot, "mobile-perf", [
+      "name: mobile-perf",
+      "description: React Native performance guidance for mobile work.",
+      "keywords:",
+      "  - react native",
+      "  - mobile performance",
+      "task_types:",
+      "  - react native",
+      "path_globs:",
+      "  - app/**/*.tsx",
+      "priority: 3",
+      "auto_apply: true"
+    ], [
+      "# Mobile Performance",
+      "",
+      "## Checklist",
+      "",
+      "Prioritize list rendering and memoization."
+    ]);
+
+    await mkdir(path.join(workspace, "app"), { recursive: true });
+    await writeFile(path.join(workspace, "app", "Screen.tsx"), "export const Screen = () => null;\n", "utf8");
+
+    process.env.VETALA_SKILL_ROOT = skillRoot;
+
+    try {
+      const store = new SessionStore();
+      const session = await store.createSession(workspace, "sarvam-105b");
+      const runtime = new SkillRuntime({
+        getSession: () => session,
+        sessionStore: store
+      });
+
+      await runtime.pinSkill("manual-guide");
+      const context = await runtime.resolveTurnContext("Please improve React Native mobile performance in app/Screen.tsx");
+
+      assert.equal(context.active.length, 2);
+      assert.equal(context.active[0]?.name, "manual-guide");
+      assert.equal(context.active[0]?.source, "pinned");
+      assert.equal(context.active[1]?.name, "mobile-perf");
+      assert.equal(context.active[1]?.source, "auto");
+      assert.deepEqual(context.labels, ["manual-guide (pinned)", "mobile-perf (auto)"]);
+      assert.match(context.prompt ?? "", /manual-guide \[pinned\]/);
+      assert.match(context.prompt ?? "", /mobile-perf \[auto\]/);
     } finally {
       if (originalSkillRoot === undefined) {
         delete process.env.VETALA_SKILL_ROOT;
@@ -700,6 +895,149 @@ test("search_repo supports regex mode and glob filters", async () => {
   });
 });
 
+test("search_repo can opt into hidden files when needed", async () => {
+  await withIsolatedXdg(async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "vetala-search-hidden-"));
+    await mkdir(path.join(root, ".github", "workflows"), { recursive: true });
+    await writeFile(path.join(root, ".github", "workflows", "ci.yml"), "hidden-signal: yes\n", "utf8");
+
+    const store = new SessionStore();
+    const session = await store.createSession(root, "sarvam-105b");
+    const tools = createToolRegistry({ includeWebSearch: false });
+    const context = createTestToolContext(root, session, store);
+
+    const hiddenSkipped = await tools.execute(
+      toolCall("search_repo", {
+        query: "hidden-signal",
+        globs: [".github/**/*.yml"]
+      }),
+      context
+    );
+    assert.equal(hiddenSkipped.isError, false);
+    assert.equal(hiddenSkipped.content, "(no matches)");
+
+    const hiddenIncluded = await tools.execute(
+      toolCall("search_repo", {
+        query: "hidden-signal",
+        globs: [".github/**/*.yml"],
+        includeHidden: true
+      }),
+      context
+    );
+    assert.equal(hiddenIncluded.isError, false);
+    assert.match(hiddenIncluded.content, /\.github\/workflows\/ci\.yml:1:hidden-signal: yes/);
+  });
+});
+
+test("search_repo short-circuits explicit file path queries", async () => {
+  await withIsolatedXdg(async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "vetala-search-direct-file-"));
+    await mkdir(path.join(root, "test-react"), { recursive: true });
+    await writeFile(path.join(root, "test-react", "App.tsx"), "export function App() { return null; }\n", "utf8");
+
+    const store = new SessionStore();
+    const session = await store.createSession(root, "sarvam-105b");
+    const tools = createToolRegistry({ includeWebSearch: false });
+    const context = createTestToolContext(root, session, store);
+
+    const result = await tools.execute(
+      toolCall("search_repo", {
+        query: "test-react/App.tsx"
+      }),
+      context
+    );
+
+    assert.equal(result.isError, false);
+    assert.match(result.summary, /Query resolves to file/);
+    assert.match(result.content, /Use read_file or read_file_chunk/i);
+    assert.deepEqual(result.referencedFiles, [path.join(root, "test-react", "App.tsx")]);
+  });
+});
+
+test("git_review reports staged, unstaged, and untracked worktree changes", async () => {
+  await withIsolatedXdg(async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "vetala-git-review-"));
+    await initGitRepo(root);
+
+    await writeFile(path.join(root, "tracked.txt"), "base\nupdated\n", "utf8");
+    await writeFile(path.join(root, "staged.txt"), "staged file\n", "utf8");
+    await writeFile(path.join(root, "untracked.txt"), "loose file\n", "utf8");
+    await runGit(root, ["add", "staged.txt"]);
+
+    const store = new SessionStore();
+    const session = await store.createSession(root, "sarvam-105b");
+    const tools = createToolRegistry({ includeWebSearch: false });
+    const context = createTestToolContext(root, session, store);
+
+    const result = await tools.execute(
+      toolCall("git_review", {
+        target: "worktree"
+      }),
+      context
+    );
+
+    assert.equal(result.isError, false);
+    assert.match(result.content, /status/);
+    assert.match(result.content, /staged changes/);
+    assert.match(result.content, /unstaged changes/);
+    assert.match(result.content, /untracked files/);
+    assert.match(result.content, /staged\.txt/);
+    assert.match(result.content, /tracked\.txt/);
+    assert.match(result.content, /untracked\.txt/);
+  });
+});
+
+test("runExecFile aborts active child processes", async () => {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 50);
+
+  await assert.rejects(
+    () =>
+      runExecFile(
+        "node",
+        ["-e", "setTimeout(() => {}, 5000)"],
+        {
+          cwd: process.cwd(),
+          noPty: true,
+          timeoutMs: 5_000,
+          signal: controller.signal
+        }
+      ),
+    (error: unknown) => error instanceof Error && error.name === "AbortError"
+  );
+});
+
+test("git_review compares against a base branch using the merge base", async () => {
+  await withIsolatedXdg(async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "vetala-git-base-review-"));
+    await initGitRepo(root);
+    await runGit(root, ["checkout", "-b", "feature"]);
+
+    await writeFile(path.join(root, "tracked.txt"), "base\nfeature branch change\n", "utf8");
+    await runGit(root, ["add", "tracked.txt"]);
+    await runGit(root, ["commit", "-m", "feature change"]);
+
+    const store = new SessionStore();
+    const session = await store.createSession(root, "sarvam-105b");
+    const tools = createToolRegistry({ includeWebSearch: false });
+    const context = createTestToolContext(root, session, store);
+
+    const result = await tools.execute(
+      toolCall("git_review", {
+        target: "base_branch",
+        baseBranch: "main"
+      }),
+      context
+    );
+
+    assert.equal(result.isError, false);
+    assert.match(result.summary, /against main/);
+    assert.match(result.content, /merge base:/);
+    assert.match(result.content, /diff against merge base/);
+    assert.match(result.content, /feature branch change/);
+  });
+});
+
 test("undoLastEdit restores the previous file content", async () => {
   await withIsolatedXdg(async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "vetala-undo-"));
@@ -742,10 +1080,42 @@ function toolCall(name: string, args: Record<string, unknown>): ToolCall {
   };
 }
 
+async function initGitRepo(root: string): Promise<void> {
+  await runGit(root, ["init"]);
+  await runGit(root, ["config", "user.name", "Vetala Test"]);
+  await runGit(root, ["config", "user.email", "vetala@example.com"]);
+  await writeFile(path.join(root, "tracked.txt"), "base\n", "utf8");
+  await runGit(root, ["add", "tracked.txt"]);
+  await runGit(root, ["commit", "-m", "initial commit"]);
+  await runGit(root, ["branch", "-M", "main"]);
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const result = await runExecFile("git", args, {
+    cwd,
+    noPty: true
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${[result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n")}`);
+  }
+  return result.stdout.trim();
+}
+
 function createTestToolContext(root: string, session: SessionState, store: SessionStore): ToolContext {
+  const controller = new AbortController();
   return {
     cwd: root,
     workspaceRoot: root,
+    lifecycle: {
+      signal: controller.signal,
+      throwIfAborted: () => {
+        if (controller.signal.aborted) {
+          const error = new Error("The operation was aborted.");
+          error.name = "AbortError";
+          throw error;
+        }
+      }
+    },
     approvals: {
       requestApproval: async () => true,
       hasSessionGrant: () => false,
@@ -779,6 +1149,27 @@ function createTestToolContext(root: string, session: SessionState, store: Sessi
       search: async () => []
     }
   };
+}
+
+async function writeSkillFixture(
+  skillRoot: string,
+  name: string,
+  frontmatterLines: string[],
+  bodyLines: string[],
+  extraFiles: Record<string, string> = {}
+): Promise<void> {
+  const root = path.join(skillRoot, name);
+  await mkdir(root, { recursive: true });
+  await writeFile(
+    path.join(root, "SKILL.md"),
+    ["---", ...frontmatterLines, "---", "", ...bodyLines, ""].join("\n"),
+    "utf8"
+  );
+  for (const [relativePath, content] of Object.entries(extraFiles)) {
+    const target = path.join(root, relativePath);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, content, "utf8");
+  }
 }
 
 async function withIsolatedXdg(run: () => Promise<void>): Promise<void> {

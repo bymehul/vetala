@@ -41,11 +41,12 @@ type model struct {
 	height int
 
 	// IPC State
-	dashboard DashboardData
-	status    string
-	ready     bool
-	running   bool
-	trusted   bool
+	dashboard   DashboardData
+	status      string
+	ready       bool
+	running     bool
+	trusted     bool
+	skillLabels []string
 
 	// Components
 	viewport viewport.Model
@@ -336,6 +337,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.flushLiveBuffer()
 
+	case MsgDiscardDraft:
+		if m.modalState != ModalNone {
+			m.queueUpdate(deferredUpdate{kind: "discard"})
+			return m, nil
+		}
+		m.discardLiveBuffer()
+
 	case MsgActivity:
 		if string(msg) == "" {
 			m.activity = nil
@@ -360,6 +368,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.running = false
 			m.activity = nil
 		}
+		m.transcriptDirty = true
+
+	case MsgSkills:
+		m.skillLabels = append([]string(nil), msg...)
+		m.dashboardDirty = true
 		m.transcriptDirty = true
 
 	case MsgPromptTrust:
@@ -737,6 +750,13 @@ func (m *model) flushLiveBuffer() {
 	m.transcriptDirty = true
 }
 
+func (m *model) discardLiveBuffer() {
+	if m.liveBuffer == "" {
+		return
+	}
+	m.liveBuffer = ""
+}
+
 func (m *model) queueUpdate(update deferredUpdate) {
 	m.pendingUpdates = append(m.pendingUpdates, update)
 }
@@ -753,6 +773,8 @@ func (m *model) flushPendingUpdates() {
 			m.appendLiveChunk(update.chunk)
 		case "flush":
 			m.flushLiveBuffer()
+		case "discard":
+			m.discardLiveBuffer()
 		}
 	}
 	m.pendingUpdates = nil

@@ -1,6 +1,25 @@
 ---
 name: react-best-practices
 description: React and Next.js performance optimization guidelines. Use when writing, reviewing, or refactoring React or Next.js code to apply stronger performance patterns. Triggers on tasks involving React components, Next.js pages, data fetching, bundle optimization, or performance improvements.
+keywords:
+  - react performance
+  - next.js performance
+  - bundle optimization
+  - rerender
+  - data fetching
+task_types:
+  - react performance
+  - next.js optimization
+  - frontend performance
+path_globs:
+  - **/*.tsx
+  - **/*.jsx
+  - app/**/*.tsx
+  - pages/**/*.tsx
+  - components/**/*.tsx
+  - next.config.*
+priority: 4
+auto_apply: true
 ---
 
 # React Best Practices

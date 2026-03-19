@@ -24,6 +24,7 @@ const DEFAULT_RULES = `# CORE REASONING & TOOL PROTOCOL (CRITICAL)
 
 # WORKFLOW PLAYBOOK
 - Exploration : \`search_repo\` or directory listing -> build a mental map before touching anything.
+- Explicit file paths : if the user already named a specific file, use \`read_file\` or \`read_file_chunk\` before \`search_repo\`.
 - Comprehension : \`read_file\` on every file you intend to modify. Understand the full context.
 - Implementation : \`apply_patch\` for targeted edits; \`write_file\` only for new files or full rewrites.
 - Verification : run tests/linters via \`run_shell\`; read back changed files to confirm correctness.

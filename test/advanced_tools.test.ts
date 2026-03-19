@@ -12,9 +12,20 @@ import type { ToolContext } from "../src/types.js";
 
 async function createTempContext(): Promise<{ root: string; ctx: ToolContext }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "vetala-adv-tools-test-"));
+  const controller = new AbortController();
   const ctx: ToolContext = {
     cwd: root,
     workspaceRoot: root,
+    lifecycle: {
+      signal: controller.signal,
+      throwIfAborted: () => {
+        if (controller.signal.aborted) {
+          const error = new Error("The operation was aborted.");
+          error.name = "AbortError";
+          throw error;
+        }
+      }
+    },
     approvals: {
       requestApproval: async () => true,
       hasSessionGrant: () => false,

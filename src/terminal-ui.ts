@@ -133,6 +133,14 @@ export class TerminalUI {
     // No-op for the plain terminal UI; streaming already printed output.
   }
 
+  discardAssistantDraft(): void {
+    this.endAssistantTurn();
+  }
+
+  updateActiveSkills(skills: string[]): void {
+    void skills;
+  }
+
   endAssistantTurn(): void {
     if (!this.assistantLineOpen) {
       return;
@@ -149,7 +157,7 @@ export class TerminalUI {
     console.log(`${chalk.magenta("tool")} ${chalk.dim("│")} ${toolCall.function.name} ${chalk.dim(renderedArgs)}`);
   }
 
-  printToolResult(summary: string, isError: boolean): void {
+  printToolResult(summary: string, isError: boolean, _detail?: string): void {
     this.endAssistantTurn();
     const prefix = isError ? chalk.red("tool") : chalk.green("tool");
     console.log(`${prefix} ${chalk.dim("│")} ${summary}`);

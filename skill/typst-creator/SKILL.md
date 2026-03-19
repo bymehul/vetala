@@ -1,6 +1,20 @@
 ---
 name: typst-creator
 description: Generate Typst source code for documents, reports, papers, and presentations, covering markup, math, scripting, and layout syntax.
+keywords:
+  - typst
+  - typesetting
+  - document layout
+  - typst template
+  - typst report
+task_types:
+  - typesetting
+  - document generation
+  - typst authoring
+path_globs:
+  - **/*.typ
+priority: 4
+auto_apply: true
 ---
 
 # Typst Document Creation Capability

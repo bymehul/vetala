@@ -1,6 +1,20 @@
 ---
 name: deploy-to-vercel
 description: Deploy applications and websites to Vercel. Use when the user requests deployment actions like "deploy my app", "deploy and give me the link", "push this live", or "create a preview deployment".
+keywords:
+  - vercel
+  - preview deployment
+  - deploy my app
+  - deploy this site
+task_types:
+  - deployment
+  - vercel deployment
+path_globs:
+  - vercel.json
+  - package.json
+  - next.config.*
+priority: 4
+auto_apply: true
 ---
 
 # Deploy to Vercel

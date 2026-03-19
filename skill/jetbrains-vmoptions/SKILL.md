@@ -1,6 +1,20 @@
 ---
 name: jetbrains-vmoptions
 description: Provides JetBrains IDE VM options knowledge for version-specific GC selection and memory/performance tuning (JDK 17/21, IDE 222+). Cross-platform only.
+keywords:
+  - jetbrains
+  - vmoptions
+  - idea.vmoptions
+  - studio.vmoptions
+  - heap size
+task_types:
+  - ide tuning
+  - jetbrains configuration
+path_globs:
+  - *.vmoptions
+  - **/*.vmoptions
+priority: 3
+auto_apply: true
 ---
 
 # JetBrains IDE VM Options Capabilities

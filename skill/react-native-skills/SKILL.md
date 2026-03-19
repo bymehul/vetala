@@ -5,6 +5,25 @@ description:
   when building React Native components, optimizing list performance,
   implementing animations, or working with native modules. Triggers on tasks
   involving React Native, Expo, mobile performance, or native platform APIs.
+keywords:
+  - react native
+  - expo
+  - mobile app
+  - native modules
+  - flatlist performance
+task_types:
+  - react native
+  - mobile development
+  - expo
+path_globs:
+  - **/*.tsx
+  - **/*.jsx
+  - android/**
+  - ios/**
+  - app.json
+  - app.config.*
+priority: 4
+auto_apply: true
 ---
 
 # React Native Skills

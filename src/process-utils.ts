@@ -13,6 +13,7 @@ interface BaseOptions {
   cwd: string;
   timeoutMs?: number;
   noPty?: boolean;
+  signal?: AbortSignal;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -42,11 +43,16 @@ export async function runExecFile(
   args: string[],
   options: BaseOptions
 ): Promise<CommandOutput> {
+  if (options.signal?.aborted) {
+    throw createAbortError();
+  }
+
   await loadPty();
 
   if (pty && Terminal && !process.env.DISABLE_PTY && !options.noPty) {
     return new Promise((resolve, reject) => {
       let timedOut = false;
+      let settled = false;
       
       const ptyProcess = pty.spawn(file, args, {
         cwd: options.cwd,
@@ -61,6 +67,40 @@ export async function runExecFile(
         ptyProcess.kill("SIGTERM");
       }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
+      const cleanup = () => {
+        clearTimeout(timeout);
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+
+      const rejectOnce = (error: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+
+      const resolveOnce = (output: CommandOutput) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(output);
+      };
+
+      const onAbort = () => {
+        try {
+          ptyProcess.kill("SIGTERM");
+        } catch {
+          // Best-effort shutdown.
+        }
+        rejectOnce(createAbortError());
+      };
+
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+
       let stdoutRaw = "";
 
       ptyProcess.onData((data: string) => {
@@ -68,8 +108,10 @@ export async function runExecFile(
       });
 
       ptyProcess.onExit(({ exitCode, signal }: { exitCode: number; signal: number }) => {
-        clearTimeout(timeout);
-        
+        if (settled) {
+          return;
+        }
+
         try {
           const terminal = new Terminal({ cols: 120, rows: 40, allowProposedApi: true });
           terminal.write(stdoutRaw, () => {
@@ -85,7 +127,7 @@ export async function runExecFile(
             let parsedStdout = lines.join("\n").replace(/\n+$/, "");
             parsedStdout = stripAnsi(parsedStdout);
             
-            resolve({
+            resolveOnce({
               stdout: parsedStdout,
               stderr: "", 
               exitCode,
@@ -94,7 +136,7 @@ export async function runExecFile(
             });
           });
         } catch (e) {
-          resolve({
+          resolveOnce({
             stdout: stripAnsi(stdoutRaw),
             stderr: "",
             exitCode,
@@ -108,6 +150,7 @@ export async function runExecFile(
 
   return new Promise((resolve, reject) => {
     let timedOut = false;
+    let settled = false;
     const child = spawn(file, args, {
       cwd: options.cwd,
       stdio: ["ignore", "pipe", "pipe"],
@@ -118,6 +161,36 @@ export async function runExecFile(
       timedOut = true;
       child.kill("SIGTERM");
     }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+
+    const rejectOnce = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const resolveOnce = (output: CommandOutput) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(output);
+    };
+
+    const onAbort = () => {
+      child.kill("SIGTERM");
+      rejectOnce(createAbortError());
+    };
+
+    options.signal?.addEventListener("abort", onAbort, { once: true });
 
     let stdout = "";
     let stderr = "";
@@ -131,13 +204,11 @@ export async function runExecFile(
     });
 
     child.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
+      rejectOnce(error);
     });
 
     child.on("close", (exitCode, signal) => {
-      clearTimeout(timeout);
-      resolve({ 
+      resolveOnce({ 
         stdout: stripAnsi(stdout), 
         stderr: stripAnsi(stderr), 
         exitCode, 
@@ -171,4 +242,10 @@ function resolveShell(): { file: string; args: string[] } {
 function collect(current: string, addition: string): string {
   const next = current + addition;
   return next.length > MAX_CAPTURED_BYTES ? next.slice(0, MAX_CAPTURED_BYTES) : next;
+}
+
+function createAbortError(): Error {
+  const error = new Error("The operation was aborted.");
+  error.name = "AbortError";
+  return error;
 }

@@ -7,6 +7,24 @@ description:
   state management, bundle optimization, re-render prevention, accessibility, and
   UI patterns. Triggers on React component work, performance issues, code review,
   or new feature development.
+keywords:
+  - vite
+  - react vite
+  - spa
+  - vite config
+  - frontend feature
+task_types:
+  - vite development
+  - react frontend
+  - frontend implementation
+path_globs:
+  - vite.config.*
+  - **/*.tsx
+  - **/*.jsx
+  - src/**/*.ts
+  - src/**/*.tsx
+priority: 4
+auto_apply: true
 ---
 
 # React 19 + Vite Guide

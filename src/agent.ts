@@ -17,8 +17,20 @@ import type {
   RuntimeHostProfile,
   SessionState,
   StreamedAssistantTurn,
+  ToolCall,
   ToolContext
 } from "./types.js";
+
+export interface InvalidToolCall {
+  toolName: string;
+  rawArguments: string;
+  reason: string;
+}
+
+export interface ToolCallPartition {
+  validToolCalls: ToolCall[];
+  invalidToolCalls: InvalidToolCall[];
+}
 
 export interface AgentOptions {
   config: EffectiveConfig;
@@ -33,13 +45,19 @@ export interface AgentOptions {
   requestTextInput: (title: string, placeholder: string) => Promise<string>;
   requestSelect: (title: string, options: string[]) => Promise<number>;
   computeDiff?: (before: string, after: string) => Promise<string | null>;
-  fastSearch?: (query: string, root: string, options?: { limit?: number; regex?: boolean }) => Promise<any[] | null>;
+  fastSearch?: (
+    query: string,
+    root: string,
+    options?: { limit?: number; regex?: boolean; globs?: string[]; includeHidden?: boolean; signal?: AbortSignal }
+  ) => Promise<any[] | null>;
 }
 
 export class Agent {
   private readonly client: ChatProviderClient;
   private activeRequestController: AbortController | null = null;
+  private activeTurnController: AbortController | null = null;
   private stopRequested = false;
+  private turnSkillPrompt: string | null = null;
 
   constructor(private readonly options: AgentOptions) {
     this.client = createProviderClient(options.config.providers[options.session.provider]);
@@ -51,170 +69,234 @@ export class Agent {
 
   requestStop(): void {
     this.stopRequested = true;
+    this.activeTurnController?.abort();
     this.activeRequestController?.abort();
   }
 
   async runTurn(userInput: string, streaming: boolean): Promise<void> {
+    const turnController = new AbortController();
+    this.activeTurnController = turnController;
     this.stopRequested = false;
-    const userMessage = this.persistedMessage({
-      role: "user",
-      content: userInput
-    });
-    await this.options.sessionStore.appendMessage(this.options.session, userMessage);
-    void appendHistoryEntry(this.options.config, this.options.session.id, userInput).catch(() => {
-      // Best-effort history persistence.
-    });
+    try {
+      const userMessage = this.persistedMessage({
+        role: "user",
+        content: userInput
+      });
+      await this.options.sessionStore.appendMessage(this.options.session, userMessage);
+      void appendHistoryEntry(this.options.config, this.options.session.id, userInput).catch(() => {
+        // Best-effort history persistence.
+      });
 
-    const localGreeting = maybeLocalGreeting(userInput);
+      this.turnSkillPrompt = null;
+      this.options.ui.updateActiveSkills([]);
+      const localGreeting = maybeLocalGreeting(userInput);
 
-    if (localGreeting) {
-      await this.appendAndRenderAssistantMessage(localGreeting, false);
-      return;
-    }
+      if (localGreeting) {
+        await this.appendAndRenderAssistantMessage(localGreeting, false);
+        return;
+      }
 
-    const provider = this.options.config.providers[this.options.session.provider];
-    const providerDefinition = getProviderDefinition(this.options.session.provider);
+      const turnSkillContext = await this.options.skills.resolveTurnContext(userInput);
+      this.turnSkillPrompt = turnSkillContext.prompt;
+      this.options.ui.updateActiveSkills(turnSkillContext.labels);
 
-    if (!provider.authValue) {
-      const missingAuthMessage =
-        provider.authSource === "stored_hash"
-          ? `A stored SHA-256 fingerprint exists for ${providerDefinition.label}, but the raw credential is not available in this process. Use /model to enter the key again or set ${providerDefinition.auth.envVars.join(", ")}.`
-          : `${providerDefinition.label} credentials are missing. Set ${providerDefinition.auth.envVars.join(", ")} and try again.`;
+      const provider = this.options.config.providers[this.options.session.provider];
+      const providerDefinition = getProviderDefinition(this.options.session.provider);
 
-      await this.appendAndRenderAssistantMessage(
-        missingAuthMessage,
-        false
-      );
-      return;
-    }
+      if (!provider.authValue) {
+        const missingAuthMessage =
+          provider.authSource === "stored_hash"
+            ? `A stored SHA-256 fingerprint exists for ${providerDefinition.label}, but the raw credential is not available in this process. Use /model to enter the key again or set ${providerDefinition.auth.envVars.join(", ")}.`
+            : `${providerDefinition.label} credentials are missing. Set ${providerDefinition.auth.envVars.join(", ")} and try again.`;
 
-    const seenToolCalls = new Set<string>();
-    let repeatWarningInjected = 0;
-    let consecutiveApiErrors = 0;
+        await this.appendAndRenderAssistantMessage(
+          missingAuthMessage,
+          false
+        );
+        return;
+      }
 
-    while (true) {
-      this.throwIfStopped();
-      const conversation = compactConversation(
-        this.options.session.messages,
-        this.options.session.referencedFiles,
-        this.options.config.memory
-      );
-      const recentCount = this.options.config.memory.recentMessageCount;
-      this.options.ui.activity(
-        conversation.compactedCount > 0
-          ? `Using ${recentCount} recent messages and ${conversation.compactedCount} compacted earlier messages.`
-          : "Using the live conversation context."
-      );
-      const systemPrompt = await this.systemPrompt(conversation.memory, conversation.compactedCount);
-      const requestMessages = withSystemMessage(
-        systemPrompt,
-        conversation.recentMessages
-      );
-      let turn;
+      const seenToolCalls = new Set<string>();
+      let repeatWarningInjected = 0;
+      let consecutiveApiErrors = 0;
+      let malformedToolCallRetries = 0;
+      let sanitizedHistoryWarningShown = false;
 
-      try {
-        turn = await this.completeTurn(requestMessages, streaming);
-        consecutiveApiErrors = 0; // Reset on success
-      } catch (error) {
-        if (isAbortError(error) || error instanceof AgentInterruptedError) {
-          this.options.ui.endAssistantTurn();
-          throw new AgentInterruptedError();
+      while (true) {
+        this.throwIfStopped();
+        const conversation = compactConversation(
+          this.options.session.messages,
+          this.options.session.referencedFiles,
+          this.options.config.memory
+        );
+        const sanitizedConversation = sanitizeConversationMessages(conversation.recentMessages);
+        const recentCount = this.options.config.memory.recentMessageCount;
+        this.options.ui.activity(
+          conversation.compactedCount > 0
+            ? `Using ${recentCount} recent messages and ${conversation.compactedCount} compacted earlier messages.`
+            : "Using the live conversation context."
+        );
+        if (sanitizedConversation.invalidToolCallCount > 0 && !sanitizedHistoryWarningShown) {
+          sanitizedHistoryWarningShown = true;
+          this.options.ui.activity(
+            `Ignoring ${sanitizedConversation.invalidToolCallCount} malformed tool call${sanitizedConversation.invalidToolCallCount === 1 ? "" : "s"} from earlier session history.`
+          );
+        }
+        const systemPrompt = await this.systemPrompt(conversation.memory, conversation.compactedCount);
+        const requestMessages = withSystemMessage(
+          systemPrompt,
+          sanitizedConversation.messages
+        );
+        let turn;
+
+        try {
+          turn = await this.completeTurn(requestMessages, streaming);
+          consecutiveApiErrors = 0; // Reset on success
+        } catch (error) {
+          if (isAbortError(error) || error instanceof AgentInterruptedError) {
+            this.options.ui.endAssistantTurn();
+            throw new AgentInterruptedError();
+          }
+
+          consecutiveApiErrors += 1;
+          const errorMessage = error instanceof Error ? error.message : String(error);
+
+          if (consecutiveApiErrors >= 3) {
+            await this.appendAndRenderAssistantMessage(
+              `I've encountered multiple consecutive API errors and must stop. Last error: ${errorMessage}`,
+              true
+            );
+            return;
+          }
+
+          this.options.ui.warn(`API Error: ${errorMessage}`);
+          this.options.ui.activity("Retrying automatically...");
+
+          const syntheticUserMessage = this.persistedMessage({
+            role: "user",
+            content: `SYSTEM ALERT: The previous generation failed with an API error: ${errorMessage}\nIf you were generating a large file, you likely hit the maximum output token limit. Please try breaking your response down, or use the append_to_file tool to write large files in chunks.`
+          });
+          await this.options.sessionStore.appendMessage(this.options.session, syntheticUserMessage);
+
+          continue;
         }
 
-        consecutiveApiErrors += 1;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        
-        if (consecutiveApiErrors >= 3) {
-          await this.appendAndRenderAssistantMessage(
-            `I've encountered multiple consecutive API errors and must stop. Last error: ${errorMessage}`,
-            true
-          );
+        const hasContent = typeof turn.content === "string" && turn.content.trim().length > 0;
+        if (!hasContent && turn.toolCalls.length === 0) {
+          if (emptyResponseWarningEnabled()) {
+            this.options.ui.warn(emptyResponseWarningMessage());
+          }
+          this.options.ui.endAssistantTurn();
           return;
         }
 
-        this.options.ui.warn(`API Error: ${errorMessage}`);
-        this.options.ui.activity("Retrying automatically...");
-        
-        const syntheticUserMessage = this.persistedMessage({
-          role: "user",
-          content: `SYSTEM ALERT: The previous generation failed with an API error: ${errorMessage}\nIf you were generating a large file, you likely hit the maximum output token limit. Please try breaking your response down, or use the append_to_file tool to write large files in chunks.`
-        });
-        await this.options.sessionStore.appendMessage(this.options.session, syntheticUserMessage);
-        
-        continue;
-      }
+        const partitionedToolCalls = partitionToolCalls(turn.toolCalls);
+        if (partitionedToolCalls.invalidToolCalls.length > 0) {
+          malformedToolCallRetries += 1;
 
-      const hasContent = typeof turn.content === "string" && turn.content.trim().length > 0;
-      if (!hasContent && turn.toolCalls.length === 0) {
-        if (emptyResponseWarningEnabled()) {
-          this.options.ui.warn(emptyResponseWarningMessage());
-        }
-        this.options.ui.endAssistantTurn();
-        return;
-      }
-
-      const assistantMessage = this.persistedMessage({
-        role: "assistant",
-        content: turn.content || null,
-        tool_calls: turn.toolCalls.length > 0 ? turn.toolCalls : null
-      });
-      await this.options.sessionStore.appendMessage(this.options.session, assistantMessage);
-
-      if (turn.toolCalls.length === 0) {
-        this.options.ui.endAssistantTurn();
-        return;
-      }
-
-      let suppressedRepeats = 0;
-      for (const toolCall of turn.toolCalls) {
-        this.throwIfStopped();
-        this.options.ui.printToolCall(toolCall);
-        const signature = toolCallSignature(toolCall);
-        let result;
-
-        if (seenToolCalls.has(signature)) {
-          suppressedRepeats += 1;
-          this.options.ui.activity(`Skipping repeated ${toolCall.function.name} call.`);
-          result = {
-            summary: "Repeated tool call suppressed",
-            content: "This exact tool call already ran earlier in this turn. Reuse the earlier result instead of calling it again.",
-            isError: true
-          };
-        } else {
-          seenToolCalls.add(signature);
-          this.options.ui.activity(`Running ${toolCall.function.name}.`);
-          const toolSpec = this.options.tools.getTool(toolCall.function.name);
-          const isMutating = toolSpec && !toolSpec.readOnly;
-          
-          result = await this.options.tools.execute(toolCall, this.toolContext());
-
-          if (result.isError) {
-            seenToolCalls.delete(signature);
-          } else if (isMutating) {
-            seenToolCalls.clear();
+          if (hasContent) {
+            await this.options.sessionStore.appendMessage(
+              this.options.session,
+              this.persistedMessage({
+                role: "assistant",
+                content: turn.content,
+                tool_calls: null
+              })
+            );
           }
+
+          const summary = summarizeInvalidToolCalls(partitionedToolCalls.invalidToolCalls);
+          this.options.ui.warn(
+            `Model emitted malformed tool arguments${summary ? `: ${summary}` : ""}. Retrying with smaller, valid tool calls.`
+          );
+
+          if (malformedToolCallRetries >= 3) {
+            await this.appendAndRenderAssistantMessage(
+              `The model kept emitting malformed tool calls and I stopped before making changes. Last issue: ${summary || "invalid tool arguments"}.`,
+              true
+            );
+            return;
+          }
+
+          await this.options.sessionStore.appendMessage(
+            this.options.session,
+            this.persistedMessage({
+              role: "user",
+              content: malformedToolCallRepairPrompt(partitionedToolCalls.invalidToolCalls)
+            })
+          );
+          continue;
+        }
+        malformedToolCallRetries = 0;
+
+        const assistantMessage = this.persistedMessage({
+          role: "assistant",
+          content: turn.content || null,
+          tool_calls: partitionedToolCalls.validToolCalls.length > 0 ? partitionedToolCalls.validToolCalls : null
+        });
+        await this.options.sessionStore.appendMessage(this.options.session, assistantMessage);
+
+        if (partitionedToolCalls.validToolCalls.length === 0) {
+          this.options.ui.endAssistantTurn();
+          return;
         }
 
-        this.throwIfStopped();
-        this.options.ui.printToolResult(result.summary, result.isError);
-        await this.options.sessionStore.appendMessage(
-          this.options.session,
-          this.persistedMessage({
-            role: "tool",
-            content: result.content,
-            tool_call_id: toolCall.id
-          })
-        );
-      }
+        let suppressedRepeats = 0;
+        for (const toolCall of partitionedToolCalls.validToolCalls) {
+          this.throwIfStopped();
+          this.options.ui.printToolCall(toolCall);
+          const signature = toolCallSignature(toolCall);
+          let result;
 
-      if (shouldInjectRepeatWarning(suppressedRepeats, repeatWarningInjected)) {
-        repeatWarningInjected += 1;
-        const warning = this.persistedMessage({
-          role: "user",
-          content: toolRepeatWarningMessage()
-        });
-        await this.options.sessionStore.appendMessage(this.options.session, warning);
+          if (seenToolCalls.has(signature)) {
+            suppressedRepeats += 1;
+            this.options.ui.activity(`Skipping repeated ${toolCall.function.name} call.`);
+            result = {
+              summary: "Repeated tool call suppressed",
+              content: "This exact tool call already ran earlier in this turn. Reuse the earlier result instead of calling it again.",
+              isError: true
+            };
+          } else {
+            seenToolCalls.add(signature);
+            this.options.ui.activity(`Running ${toolCall.function.name}.`);
+            const toolSpec = this.options.tools.getTool(toolCall.function.name);
+            const isMutating = toolSpec && !toolSpec.readOnly;
+
+            result = await this.options.tools.execute(toolCall, this.toolContext(turnController));
+
+            if (result.isError) {
+              seenToolCalls.delete(signature);
+            } else if (isMutating) {
+              seenToolCalls.clear();
+            }
+          }
+
+          this.throwIfStopped();
+          this.options.ui.printToolResult(result.summary, result.isError, result.content);
+          await this.options.sessionStore.appendMessage(
+            this.options.session,
+            this.persistedMessage({
+              role: "tool",
+              content: result.content,
+              tool_call_id: toolCall.id
+            })
+          );
+        }
+
+        if (shouldInjectRepeatWarning(suppressedRepeats, repeatWarningInjected)) {
+          repeatWarningInjected += 1;
+          const warning = this.persistedMessage({
+            role: "user",
+            content: toolRepeatWarningMessage()
+          });
+          await this.options.sessionStore.appendMessage(this.options.session, warning);
+        }
       }
+    } finally {
+      if (this.activeTurnController === turnController) {
+        this.activeTurnController = null;
+      }
+      this.turnSkillPrompt = null;
     }
   }
 
@@ -266,7 +348,7 @@ export class Agent {
         throw new AgentInterruptedError();
       }
 
-      this.options.ui.endAssistantTurn();
+      this.options.ui.discardAssistantDraft();
       this.options.ui.activity("Streaming failed. Retrying with buffered completion.");
       this.options.ui.warn(
         `Streaming failed, falling back to buffered completion: ${error instanceof Error ? error.message : String(error)}`
@@ -291,10 +373,18 @@ export class Agent {
     };
   }
 
-  private toolContext(): ToolContext {
+  private toolContext(turnController: AbortController): ToolContext {
     return {
       cwd: process.cwd(),
       workspaceRoot: this.options.session.workspaceRoot,
+      lifecycle: {
+        signal: turnController.signal,
+        throwIfAborted: () => {
+          if (turnController.signal.aborted || this.stopRequested) {
+            throw new AgentInterruptedError();
+          }
+        }
+      },
       approvals: {
         requestApproval: (request) => this.options.approvals.requestApproval(request),
         hasSessionGrant: (key) => this.options.approvals.hasSessionGrant(key),
@@ -307,7 +397,10 @@ export class Agent {
       },
       performance: {
         computeDiff: (before, after) => this.options.computeDiff ? this.options.computeDiff(before, after) : Promise.resolve(null),
-        fastSearch: (query, root, opts) => this.options.fastSearch ? this.options.fastSearch(query, root, opts) : Promise.resolve(null)
+        fastSearch: (query, root, opts) => this.options.fastSearch ? this.options.fastSearch(query, root, {
+          ...opts,
+          signal: turnController.signal
+        }) : Promise.resolve(null)
       },
       reads: {
         hasRead: (targetPath) => this.options.session.readFiles.includes(targetPath),
@@ -351,7 +444,6 @@ export class Agent {
 
   private async systemPrompt(memory: string | null, compactedCount: number): Promise<string> {
     const skillInventory = await this.options.skills.inventoryPrompt();
-    const pinnedSkillContext = await this.options.skills.pinnedPrompt();
     const [rulesPrompt, persistentMemory] = await Promise.all([
       loadRulesPrompt(this.options.config.contextFiles),
       this.options.config.memories.useMemories
@@ -374,6 +466,14 @@ export class Agent {
       `Active provider: ${providerLabel(this.options.session.provider)}`,
       `Active model: ${this.options.session.model}`,
       `Allowed roots right now: ${this.options.pathPolicy.allowedRoots().join(", ")}`,
+      "When using tools, emit valid JSON object arguments only.",
+      "Prefer smaller tool calls over giant payloads. Break large refactors and large apply_patch edits into multiple steps.",
+      "When the user names a concrete file path, read that file directly with read_file or read_file_chunk before considering search_repo.",
+      "For Git-aware tasks, prefer the dedicated git tools over ad-hoc shell commands.",
+      "For change review, start with git_review targeting the full worktree so you cover staged, unstaged, and untracked files.",
+      "For branch review, compare against the merge base with the requested base branch instead of assuming HEAD~1 or the previous commit.",
+      "Use git_log and git_blame when history or ownership helps explain why code exists.",
+      "Do not commit, push, or create branches unless the user explicitly asks.",
       compactedCount > 0
         ? `Only the most recent messages are attached verbatim. ${compactedCount} earlier messages were compacted into working memory.`
         : "The full conversation is attached because the session is still short."
@@ -385,8 +485,8 @@ export class Agent {
 
     lines.push("", skillInventory);
 
-    if (pinnedSkillContext) {
-      lines.push("", pinnedSkillContext);
+    if (this.turnSkillPrompt) {
+      lines.push("", this.turnSkillPrompt);
     }
 
     if (persistentMemory) {
@@ -428,6 +528,73 @@ export class AgentInterruptedError extends Error {
 
 export function isAgentInterruptedError(error: unknown): error is AgentInterruptedError {
   return error instanceof AgentInterruptedError;
+}
+
+export function partitionToolCalls(toolCalls: ToolCall[]): ToolCallPartition {
+  const validToolCalls: ToolCall[] = [];
+  const invalidToolCalls: InvalidToolCall[] = [];
+
+  for (const toolCall of toolCalls) {
+    const toolName = toolCall.function.name.trim();
+    if (!toolName) {
+      invalidToolCalls.push({
+        toolName: "(unknown tool)",
+        rawArguments: toolCall.function.arguments,
+        reason: "Missing tool name."
+      });
+      continue;
+    }
+
+    const validationError = validateToolCallArguments(toolCall.function.arguments);
+    if (validationError) {
+      invalidToolCalls.push({
+        toolName,
+        rawArguments: toolCall.function.arguments,
+        reason: validationError
+      });
+      continue;
+    }
+
+    validToolCalls.push(toolCall);
+  }
+
+  return { validToolCalls, invalidToolCalls };
+}
+
+export function sanitizeConversationMessages<T extends ChatMessage>(messages: T[]): {
+  messages: T[];
+  invalidToolCallCount: number;
+} {
+  const sanitized: T[] = [];
+  let invalidToolCallCount = 0;
+
+  for (const message of messages) {
+    if (message.role !== "assistant" || !message.tool_calls || message.tool_calls.length === 0) {
+      sanitized.push(message);
+      continue;
+    }
+
+    const partition = partitionToolCalls(message.tool_calls);
+    invalidToolCallCount += partition.invalidToolCalls.length;
+
+    if (partition.invalidToolCalls.length === 0) {
+      sanitized.push(message);
+      continue;
+    }
+
+    if ((message.content ?? "").trim() === "" && partition.validToolCalls.length === 0) {
+      continue;
+    }
+
+    const copy = { ...message } as T & { tool_calls?: ToolCall[] | null };
+    delete copy.tool_calls;
+    if (partition.validToolCalls.length > 0) {
+      copy.tool_calls = partition.validToolCalls;
+    }
+    sanitized.push(copy);
+  }
+
+  return { messages: sanitized, invalidToolCallCount };
 }
 
 function toolCallSignature(toolCall: StreamedAssistantTurn["toolCalls"][number]): string {
@@ -477,6 +644,57 @@ function envBool(name: string): boolean | undefined {
     default:
       return undefined;
   }
+}
+
+function validateToolCallArguments(rawArguments: string): string | null {
+  if (!rawArguments.trim()) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArguments);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "Tool arguments must be a JSON object.";
+  }
+
+  return null;
+}
+
+function malformedToolCallRepairPrompt(invalidToolCalls: InvalidToolCall[]): string {
+  const tools = [...new Set(invalidToolCalls.map((issue) => issue.toolName))];
+  const lines = [
+    "SYSTEM ALERT: The previous assistant turn emitted malformed tool-call JSON, so those tools were not executed.",
+    `Affected tools: ${tools.join(", ")}.`,
+    "Retry the same intent, but emit valid JSON object arguments only.",
+    "Keep tool calls small and precise. Split large refactors or large apply_patch edits into multiple smaller tool calls."
+  ];
+
+  const applyPatchAffected = tools.some((name) => name === "apply_patch" || name === "replace_in_file");
+  if (applyPatchAffected) {
+    lines.push("For file edits, prefer smaller exact hunks with short search/replace blocks instead of one giant patch payload.");
+  }
+
+  const firstIssue = invalidToolCalls[0];
+  if (firstIssue) {
+    lines.push(`Last parse error: ${firstIssue.toolName}: ${firstIssue.reason}`);
+  }
+
+  lines.push("Continue the original request.");
+  return lines.join("\n");
+}
+
+function summarizeInvalidToolCalls(invalidToolCalls: InvalidToolCall[]): string {
+  const first = invalidToolCalls[0];
+  if (!first) {
+    return "";
+  }
+  const extra = invalidToolCalls.length - 1;
+  return `${first.toolName}: ${first.reason}${extra > 0 ? ` (+${extra} more)` : ""}`;
 }
 
 function envInt(name: string): number | undefined {

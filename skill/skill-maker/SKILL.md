@@ -1,6 +1,20 @@
 ---
 name: skill-maker
 description: Generates AI agent skill packages with SKILL.md and optional bundled resources such as scripts/, references/, and assets/.
+keywords:
+  - create skill
+  - build skill
+  - skill package
+  - skill md
+  - SKILL.md
+task_types:
+  - skill authoring
+  - agent capability design
+path_globs:
+  - skill/**
+  - **/SKILL.md
+priority: 4
+auto_apply: true
 ---
 
 # Skill Maker Capabilities

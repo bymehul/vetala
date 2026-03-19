@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -124,10 +126,91 @@ func TestSearchInFileSkipsBinary(t *testing.T) {
 		t.Fatalf("writing text file: %v", err)
 	}
 
-	if got := searchInFile(binPath, "needle", "needle", nil, 1024, 16, 10); len(got) != 0 {
+	if got := searchInFile(context.Background(), binPath, "needle", "needle", nil, 1024, 16, 10); len(got) != 0 {
 		t.Fatalf("expected binary file to be skipped, got %d matches", len(got))
 	}
-	if got := searchInFile(textPath, "needle", "needle", nil, 1024, 16, 10); len(got) == 0 {
+	if got := searchInFile(context.Background(), textPath, "needle", "needle", nil, 1024, 16, 10); len(got) == 0 {
 		t.Fatal("expected text file to return matches")
+	}
+}
+
+func TestPerformFastSearchHiddenOptIn(t *testing.T) {
+	dir := t.TempDir()
+	hiddenDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(hiddenDir, 0o755); err != nil {
+		t.Fatalf("creating hidden dir: %v", err)
+	}
+	hiddenFile := filepath.Join(hiddenDir, "ci.yml")
+	if err := os.WriteFile(hiddenFile, []byte("needle: yes\n"), 0o644); err != nil {
+		t.Fatalf("writing hidden file: %v", err)
+	}
+
+	withoutHidden := performFastSearch(context.Background(), MsgFastSearch{
+		Query: "needle",
+		Root:  dir,
+		Limit: 10,
+	})
+	if len(withoutHidden) != 0 {
+		t.Fatalf("expected hidden files to be skipped by default, got %d matches", len(withoutHidden))
+	}
+
+	withHidden := performFastSearch(context.Background(), MsgFastSearch{
+		Query:         "needle",
+		Root:          dir,
+		Limit:         10,
+		IncludeHidden: true,
+	})
+	if len(withHidden) != 1 {
+		t.Fatalf("expected hidden file match when includeHidden is enabled, got %d matches", len(withHidden))
+	}
+	if withHidden[0].FilePath != hiddenFile {
+		t.Fatalf("expected hidden match path %q, got %q", hiddenFile, withHidden[0].FilePath)
+	}
+}
+
+func TestPerformFastSearchHonorsGlobs(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	docsDir := filepath.Join(dir, "docs")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("creating src dir: %v", err)
+	}
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatalf("creating docs dir: %v", err)
+	}
+
+	tsFile := filepath.Join(srcDir, "app.ts")
+	txtFile := filepath.Join(docsDir, "app.txt")
+	if err := os.WriteFile(tsFile, []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("writing ts file: %v", err)
+	}
+	if err := os.WriteFile(txtFile, []byte("needle\n"), 0o644); err != nil {
+		t.Fatalf("writing txt file: %v", err)
+	}
+
+	matches := performFastSearch(context.Background(), MsgFastSearch{
+		Query: "needle",
+		Root:  dir,
+		Globs: []string{"src/**/*.ts"},
+		Limit: 10,
+	})
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one glob-filtered match, got %d", len(matches))
+	}
+	if matches[0].FilePath != tsFile {
+		t.Fatalf("expected glob-filtered match path %q, got %q", tsFile, matches[0].FilePath)
+	}
+}
+
+func TestRenderFooterIncludesActiveSkills(t *testing.T) {
+	m := initialModel(nil)
+	m.width = 100
+	m.height = 30
+	m.status = "Ready"
+	m.skillLabels = []string{"code-review (pinned)", "react-vite-guide (auto)"}
+
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "skills: code-review (pinned), react-vite-guide (auto)") {
+		t.Fatalf("expected footer to include active skills, got %q", footer)
 	}
 }

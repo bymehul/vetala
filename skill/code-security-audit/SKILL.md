@@ -1,6 +1,27 @@
 ---
 name: code-security-audit
 description: Performs OWASP-based code security audits on any codebase. Analyzes source code against ASVS 5.0.0 verification requirements, API Security Top 10 2023 risk patterns, OWASP CheatSheet secure coding practices, and WSTG testing methodologies. Input is a codebase to review; output is a detailed Markdown security audit report. Use when the user requests a security audit, security review, vulnerability assessment, or code security analysis.
+keywords:
+  - security audit
+  - security review
+  - vulnerability assessment
+  - owasp
+  - attack surface
+task_types:
+  - security audit
+  - security review
+  - vulnerability analysis
+path_globs:
+  - **/*.ts
+  - **/*.tsx
+  - **/*.js
+  - **/*.jsx
+  - **/*.go
+  - **/*.py
+  - **/*.java
+  - **/*.rs
+priority: 5
+auto_apply: true
 ---
 
 # Code Security Audit Capabilities

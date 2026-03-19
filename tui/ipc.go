@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,8 @@ func startIPCReader(r io.Reader, w io.Writer, p *tea.Program) {
 	const maxCapacity = 10 * 1024 * 1024 // 10MB
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, maxCapacity)
+	searchCancels := map[string]context.CancelFunc{}
+	var searchCancelMu sync.Mutex
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -47,10 +50,35 @@ func startIPCReader(r io.Reader, w io.Writer, p *tea.Program) {
 		case "fast_search":
 			var d MsgFastSearch
 			if json.Unmarshal(raw.Data, &d) == nil {
+				ctx, cancel := context.WithCancel(context.Background())
+				searchCancelMu.Lock()
+				if existing := searchCancels[d.Id]; existing != nil {
+					existing()
+				}
+				searchCancels[d.Id] = cancel
+				searchCancelMu.Unlock()
 				go func() {
-					matches := performFastSearch(d)
-					sendSearchResult(w, d.Id, matches)
+					defer func() {
+						searchCancelMu.Lock()
+						delete(searchCancels, d.Id)
+						searchCancelMu.Unlock()
+					}()
+					matches := performFastSearch(ctx, d)
+					if ctx.Err() == nil {
+						sendSearchResult(w, d.Id, matches)
+					}
 				}()
+			}
+		case "cancel_search":
+			var d ClientMsgCancelSearch
+			if json.Unmarshal(raw.Data, &d) == nil {
+				searchCancelMu.Lock()
+				cancel := searchCancels[d.Id]
+				delete(searchCancels, d.Id)
+				searchCancelMu.Unlock()
+				if cancel != nil {
+					cancel()
+				}
 			}
 		case "ready":
 			var d DashboardData
@@ -69,6 +97,8 @@ func startIPCReader(r io.Reader, w io.Writer, p *tea.Program) {
 			}
 		case "flush":
 			p.Send(MsgFlush{})
+		case "discard":
+			p.Send(MsgDiscardDraft{})
 		case "activity":
 			var d ActivityData
 			if json.Unmarshal(raw.Data, &d) == nil {
@@ -83,6 +113,11 @@ func startIPCReader(r io.Reader, w io.Writer, p *tea.Program) {
 			var d StatusData
 			if json.Unmarshal(raw.Data, &d) == nil {
 				p.Send(MsgStatus(d.Text))
+			}
+		case "skills":
+			var d SkillsData
+			if json.Unmarshal(raw.Data, &d) == nil {
+				p.Send(MsgSkills(d.Skills))
 			}
 		case "prompt":
 			var pd PromptData
@@ -131,7 +166,6 @@ func sendInterrupt(w io.Writer) {
 
 func sendExit(w io.Writer) {
 	sendToBackend(w, ClientMsg{Tag: "exit", Data: struct{}{}})
-	os.Exit(0)
 }
 
 func sendSubmitSelect(w io.Writer, id string, index int) {
@@ -150,7 +184,7 @@ func sendSearchResult(w io.Writer, id string, matches []SearchMatch) {
 	sendToBackend(w, ClientMsg{Tag: "searchResult", Data: ClientMsgSearchResult{Id: id, Matches: matches}})
 }
 
-func performFastSearch(opts MsgFastSearch) []SearchMatch {
+func performFastSearch(ctx context.Context, opts MsgFastSearch) []SearchMatch {
 	var matches []SearchMatch
 	var mu sync.Mutex
 
@@ -158,6 +192,8 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 	maxLineBytes := fastSearchMaxLineBytes()
 	sniffBytes := fastSearchSniffBytes()
 	maxMatchesPerFile := fastSearchMaxMatchesPerFile()
+	includeHidden := opts.IncludeHidden || pathContainsHiddenSegment(opts.Root)
+	globMatchers := compileSearchGlobs(opts.Globs)
 
 	var re *regexp.Regexp
 	if opts.Regex {
@@ -173,9 +209,9 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 	// Simple skip list
 	skipDirs := map[string]bool{
 		".git":         true,
+		".hg":          true,
+		".svn":         true,
 		"node_modules": true,
-		"dist":         true,
-		"build":        true,
 	}
 
 	numWorkers := runtime.NumCPU()
@@ -186,30 +222,44 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for path := range paths {
-				fileMatches := searchInFile(path, opts.Query, queryLower, re, maxLineBytes, sniffBytes, maxMatchesPerFile)
-				if len(fileMatches) > 0 {
-					mu.Lock()
-					if len(matches) < opts.Limit {
-						remaining := opts.Limit - len(matches)
-						if len(fileMatches) > remaining {
-							matches = append(matches, fileMatches[:remaining]...)
-						} else {
-							matches = append(matches, fileMatches...)
-						}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case path, ok := <-paths:
+					if !ok {
+						return
 					}
-					mu.Unlock()
+					fileMatches := searchInFile(ctx, path, opts.Query, queryLower, re, maxLineBytes, sniffBytes, maxMatchesPerFile)
+					if len(fileMatches) > 0 {
+						mu.Lock()
+						if len(matches) < opts.Limit {
+							remaining := opts.Limit - len(matches)
+							if len(fileMatches) > remaining {
+								matches = append(matches, fileMatches[:remaining]...)
+							} else {
+								matches = append(matches, fileMatches...)
+							}
+						}
+						mu.Unlock()
+					}
 				}
 			}
 		}()
 	}
 
 	_ = filepath.Walk(opts.Root, func(path string, info os.FileInfo, err error) error {
+		if ctx.Err() != nil {
+			return filepath.SkipAll
+		}
 		if err != nil {
 			return nil
 		}
 		if info.IsDir() {
-			if skipDirs[info.Name()] || strings.HasPrefix(info.Name(), ".") {
+			if path != opts.Root && skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			if path != opts.Root && !includeHidden && strings.HasPrefix(info.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -226,8 +276,21 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 		if maxFileBytes > 0 && info.Size() > maxFileBytes {
 			return nil
 		}
+		if path != opts.Root && !includeHidden && strings.HasPrefix(info.Name(), ".") {
+			return nil
+		}
+		if len(globMatchers) > 0 {
+			relativePath, err := filepath.Rel(opts.Root, path)
+			if err != nil || !matchesSearchGlobs(relativePath, globMatchers) {
+				return nil
+			}
+		}
 
-		paths <- path
+		select {
+		case <-ctx.Done():
+			return filepath.SkipAll
+		case paths <- path:
+		}
 		return nil
 	})
 
@@ -237,7 +300,10 @@ func performFastSearch(opts MsgFastSearch) []SearchMatch {
 	return matches
 }
 
-func searchInFile(path string, query string, queryLower string, re *regexp.Regexp, maxLineBytes int, sniffBytes int, maxMatches int) []SearchMatch {
+func searchInFile(ctx context.Context, path string, query string, queryLower string, re *regexp.Regexp, maxLineBytes int, sniffBytes int, maxMatches int) []SearchMatch {
+	if ctx.Err() != nil {
+		return nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -259,6 +325,9 @@ func searchInFile(path string, query string, queryLower string, re *regexp.Regex
 	}
 	lineNum := 1
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return nil
+		}
 		line := scanner.Text()
 		isMatch := false
 		if re != nil {
@@ -280,4 +349,50 @@ func searchInFile(path string, query string, queryLower string, re *regexp.Regex
 		}
 	}
 	return matches
+}
+
+func pathContainsHiddenSegment(targetPath string) bool {
+	for _, segment := range strings.Split(filepath.Clean(targetPath), string(filepath.Separator)) {
+		if segment != "" && segment != "." && segment != ".." && strings.HasPrefix(segment, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+func compileSearchGlobs(globs []string) []*regexp.Regexp {
+	var matchers []*regexp.Regexp
+	for _, glob := range globs {
+		glob = strings.TrimSpace(glob)
+		if glob == "" {
+			continue
+		}
+		escaped := regexp.QuoteMeta(filepath.ToSlash(glob))
+		escaped = strings.ReplaceAll(escaped, `\*\*/`, "___DSTAR_SLASH___")
+		escaped = strings.ReplaceAll(escaped, `/\*\*`, "___SLASH_DSTAR___")
+		escaped = strings.ReplaceAll(escaped, `\*\*`, "___DSTAR___")
+		escaped = strings.ReplaceAll(escaped, `\*`, `[^/]*`)
+		escaped = strings.ReplaceAll(escaped, "___DSTAR_SLASH___", `(.*\/)?`)
+		escaped = strings.ReplaceAll(escaped, "___SLASH_DSTAR___", `(\/.*)?`)
+		escaped = strings.ReplaceAll(escaped, "___DSTAR___", `.*`)
+		pattern := `(?:^|/)` + escaped + `$`
+		re, err := regexp.Compile(pattern)
+		if err == nil {
+			matchers = append(matchers, re)
+		}
+	}
+	return matchers
+}
+
+func matchesSearchGlobs(relativePath string, matchers []*regexp.Regexp) bool {
+	if len(matchers) == 0 {
+		return true
+	}
+	normalized := filepath.ToSlash(relativePath)
+	for _, matcher := range matchers {
+		if matcher.MatchString(normalized) {
+			return true
+		}
+	}
+	return false
 }
