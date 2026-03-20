@@ -49,6 +49,7 @@ type model struct {
 	skillLabels   []string
 	turnReasoning string
 	turnPhase     string
+	currentPlan   PlanUpdateData
 
 	// Components
 	viewport viewport.Model
@@ -81,6 +82,7 @@ type model struct {
 
 	toggleToolKeys []string
 	copyLastKeys   []string
+	copyTurnKeys   []string
 	keyDebug       bool
 	lastKeyDebug   string
 	mouseMode      tea.MouseMode
@@ -161,6 +163,7 @@ func initialModel(w io.Writer) *model {
 		entriesToolDetails: uiToolDetailsDefault(),
 		toggleToolKeys:     uiToolToggleKeys(),
 		copyLastKeys:       uiCopyLastKeys(),
+		copyTurnKeys:       uiCopyTurnKeys(),
 		keyDebug:           uiKeyDebugEnabled(),
 		mouseMode:          uiMouseMode(),
 		altScreen:          uiAltScreen(),
@@ -217,6 +220,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyLastAssistant()
 			return m, nil
 		}
+		if m.isCopyTurnKey(key) || (keystroke != key && m.isCopyTurnKey(keystroke)) {
+			m.copyLastTurnLog()
+			return m, nil
+		}
 
 		if m.handleScrollKey(key) {
 			return m, nil
@@ -247,6 +254,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			v := strings.TrimSpace(m.textArea.Value())
 			if v != "" {
+				m.currentPlan = PlanUpdateData{}
 				m.entries = append(m.entries, EntryData{Kind: "user", Text: v})
 				m.trimEntries()
 				m.transcriptDirty = true
@@ -388,6 +396,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dashboardDirty = true
 		m.transcriptDirty = true
 
+	case MsgPlanUpdate:
+		m.currentPlan = PlanUpdateData(msg)
+		m.dashboardDirty = true
+		m.transcriptDirty = true
+
 	case MsgPromptTrust:
 		m.modalState = ModalTrust
 		m.trustWs = string(msg)
@@ -420,6 +433,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.entries = nil
 		m.liveBuffer = ""
 		m.activity = nil
+		m.currentPlan = PlanUpdateData{}
 		m.entriesDirty = true
 		m.transcriptDirty = true
 		m.autoScroll = true
@@ -481,6 +495,15 @@ func (m *model) isCopyLastKey(key string) bool {
 	return false
 }
 
+func (m *model) isCopyTurnKey(key string) bool {
+	for _, k := range m.copyTurnKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *model) copyLastAssistant() {
 	text := m.lastAssistantText()
 	if text == "" {
@@ -497,6 +520,22 @@ func (m *model) copyLastAssistant() {
 	m.dashboardDirty = true
 }
 
+func (m *model) copyLastTurnLog() {
+	text := m.lastTurnLogText()
+	if text == "" {
+		m.status = "No turn log to copy"
+		m.dashboardDirty = true
+		return
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		m.status = "Copy failed"
+		m.dashboardDirty = true
+		return
+	}
+	m.status = "Copied last turn log"
+	m.dashboardDirty = true
+}
+
 func (m *model) lastAssistantText() string {
 	for i := len(m.entries) - 1; i >= 0; i-- {
 		if m.entries[i].Kind == "assistant" {
@@ -504,6 +543,105 @@ func (m *model) lastAssistantText() string {
 		}
 	}
 	return ""
+}
+
+func (m *model) lastTurnLogText() string {
+	start := 0
+	foundUser := false
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if m.entries[i].Kind == "user" {
+			start = i
+			foundUser = true
+			break
+		}
+	}
+	if !foundUser && len(m.entries) == 0 && len(m.currentPlan.Steps) == 0 && strings.TrimSpace(m.liveBuffer) == "" && m.activity == nil {
+		return ""
+	}
+
+	var sections []string
+	for _, entry := range m.entries[start:] {
+		if block := formatLogSection(entry.Kind, entry.Text); block != "" {
+			sections = append(sections, block)
+		}
+	}
+
+	if plan := strings.TrimSpace(m.lastTurnPlanText()); plan != "" {
+		sections = append(sections, plan)
+	}
+
+	if m.activity != nil {
+		if block := formatLogSection("doing", *m.activity); block != "" {
+			sections = append(sections, block)
+		}
+	} else if m.running {
+		if block := formatLogSection("doing", "Thinking..."); block != "" {
+			sections = append(sections, block)
+		}
+	}
+
+	if block := formatLogSection("assistant", strings.TrimSpace(m.liveBuffer)); block != "" {
+		sections = append(sections, block)
+	}
+
+	var trailer []string
+	if len(m.skillLabels) > 0 {
+		trailer = append(trailer, "skills: "+strings.Join(m.skillLabels, ", "))
+	}
+	if status := strings.TrimSpace(m.statusLine()); status != "" {
+		trailer = append(trailer, status)
+	}
+	if len(trailer) > 0 {
+		sections = append(sections, strings.Join(trailer, "\n"))
+	}
+
+	return strings.TrimSpace(strings.Join(sections, "\n\n"))
+}
+
+func (m *model) lastTurnPlanText() string {
+	if len(m.currentPlan.Steps) == 0 {
+		return ""
+	}
+
+	title := strings.TrimSpace(m.currentPlan.Title)
+	if title == "" {
+		title = "Plan"
+	}
+	lines := []string{title}
+	if explanation := strings.TrimSpace(m.currentPlan.Explanation); explanation != "" {
+		lines = append(lines, explanation)
+	}
+	for _, step := range m.currentPlan.Steps {
+		lines = append(lines, plainPlanMarker(step.Status)+" "+strings.TrimSpace(step.Label))
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func formatLogSection(label string, text string) string {
+	body := strings.TrimSpace(text)
+	if body == "" {
+		return ""
+	}
+	return label + "\n" + indentLogBlock(body)
+}
+
+func indentLogBlock(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = "  " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func plainPlanMarker(status string) string {
+	switch status {
+	case "completed":
+		return "[x]"
+	case "in_progress":
+		return "[>]"
+	default:
+		return "[ ]"
+	}
 }
 
 func (m *model) handleModalKey(key string) (tea.Model, tea.Cmd) {

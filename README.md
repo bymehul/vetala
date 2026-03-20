@@ -27,25 +27,16 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
-### v0.5.6
+### v0.6.0
 Added:
-- Turn deliberation with dynamic reasoning effort, visible planning/thinking summaries, and live execution phases in the TUI footer.
-- Clarification-first behavior for underspecified edit requests through stronger `ask_user` guidance.
+- Deliberation-aware TUI turns with thinking summaries, checkbox plans, and live reasoning/phase state.
+- Deterministic active-skill routing with richer pre-turn skill guidance and clearer skill visibility in the UI.
+- `Ctrl+K` full-turn log copy for sharing the latest prompt, plan, tool activity, and reply context.
 
 Patched:
-- `Ctrl+C` pause flow now interrupts active tool/model work more reliably and shows an immediate stopping modal.
-- Repo-wide search cancellation now propagates through the TypeScript backend and Go TUI worker path.
-- Non-trivial turns now surface reasoning and phase state more clearly during execution.
-
-### v0.5.5
-Added:
-- Deterministic skill routing with active-skill visibility in the UI.
-- Git-aware review flow upgrades with dedicated `/diff` and `/review` entry points.
-
-Patched:
-- Malformed tool calls are quarantined before they can poison session history.
-- `Ctrl+C` can now stop active repo search work instead of waiting for long searches to finish.
-- Explicit file-path prompts now steer toward `read_file`/`read_file_chunk` before repo-wide search.
+- Explicit file-path tasks now stay scoped to the named target instead of drifting into broad repo exploration.
+- Edit plans are evidence-driven, verification is file-targeted, and no-op edits are rejected instead of being reported as successful changes.
+- Tool interruption, repo search cancellation, malformed tool-call recovery, and post-tool activity updates are more reliable.
 
 ## Compatibility
 

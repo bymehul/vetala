@@ -1,11 +1,12 @@
 import { TerminalUI } from "./terminal-ui.js";
 import { formatRuntimeHostSummary, formatRuntimeTerminalSummary } from "./runtime-profile.js";
+import type { TurnPlan } from "./deliberation.js";
 import type { EffectiveConfig, RuntimeHostProfile, SessionState, ToolCall } from "./types.js";
 import type { Ora } from "ora";
 
 type IpcTag =
     | "ready" | "entry" | "chunk" | "flush" | "discard" | "skills"
-    | "activity" | "spinner" | "status" | "turn_state"
+    | "activity" | "spinner" | "status" | "turn_state" | "plan_update"
     | "prompt" | "clear";
 
 type EntryKind = "user" | "assistant" | "tool" | "info" | "warn" | "error" | "activity" | "thinking";
@@ -115,6 +116,14 @@ export class IpcTerminalUI extends TerminalUI {
 
     override updateTurnState(reasoning: string | null, phase: string | null): void {
         sendIPC("turn_state", { reasoning, phase });
+    }
+
+    override updatePlan(plan: TurnPlan | null): void {
+        sendIPC("plan_update", {
+            title: plan?.title ?? "",
+            explanation: plan?.explanation ?? "",
+            steps: plan?.steps ?? []
+        });
     }
 
     override endAssistantTurn(): void {

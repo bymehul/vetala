@@ -1,19 +1,36 @@
 import type { ReasoningEffort } from "./types.js";
 
+export type TaskKind = "chat" | "explain" | "edit" | "review" | "audit" | "research";
+export type TurnPlanStatus = "pending" | "in_progress" | "completed";
+export type TurnPlanStage = "inspect" | "decide" | "execute" | "complete";
+
+export interface TurnPlanStep {
+  id: "inspect" | "decide" | "execute" | "summarize";
+  label: string;
+  status: TurnPlanStatus;
+}
+
+export interface TurnPlan {
+  taskKind: TaskKind;
+  title: string;
+  explanation: string | null;
+  steps: TurnPlanStep[];
+}
+
 export interface TurnDeliberation {
+  taskKind: TaskKind;
   reasoningEffort: ReasoningEffort | null;
   reasoningLabel: ReasoningEffort | "none";
   thinkingSummary: string | null;
   guidance: string | null;
   shouldShowThinking: boolean;
+  plan: TurnPlan | null;
 }
 
 interface DeliberationOptions {
   configuredEffort?: ReasoningEffort | null;
   activeSkills?: string[];
 }
-
-type TaskKind = "chat" | "explain" | "edit" | "review" | "audit" | "research";
 
 const REVIEW_TERMS = ["review", "diff", "regression", "bug", "findings", "pr", "pull request"];
 const AUDIT_TERMS = ["audit", "security", "vulnerability", "threat", "unsafe", "exploit"];
@@ -38,12 +55,74 @@ export function analyzeTurnDeliberation(userInput: string, options: Deliberation
     : "For non-trivial tasks, form a concise plan first, then execute incrementally and verify after each meaningful change.";
 
   return {
+    taskKind,
     reasoningEffort,
     reasoningLabel,
     thinkingSummary: shouldShowThinking ? buildThinkingSummary(taskKind, filePaths, ambiguousEdit) : null,
     guidance,
-    shouldShowThinking
+    shouldShowThinking,
+    plan: shouldShowThinking ? buildTurnPlan(taskKind, filePaths, ambiguousEdit) : null
   };
+}
+
+export function advanceTurnPlan(plan: TurnPlan | null, stage: TurnPlanStage): TurnPlan | null {
+  if (!plan) {
+    return null;
+  }
+
+  const next = cloneTurnPlan(plan);
+  switch (stage) {
+    case "inspect":
+      setStepStatus(next, "inspect", "in_progress");
+      break;
+    case "decide":
+      completeStep(next, "inspect");
+      setStepStatus(next, "decide", "in_progress");
+      break;
+    case "execute":
+      completeStep(next, "inspect");
+      completeStep(next, "decide");
+      setStepStatus(next, "execute", "in_progress");
+      break;
+    case "complete":
+      for (const step of next.steps) {
+        step.status = "completed";
+      }
+      break;
+  }
+
+  return next;
+}
+
+export function updateTurnPlan(
+  plan: TurnPlan | null,
+  options: {
+    completed?: TurnPlanStep["id"][];
+    inProgress?: TurnPlanStep["id"] | null;
+  }
+): TurnPlan | null {
+  if (!plan) {
+    return null;
+  }
+
+  const next = cloneTurnPlan(plan);
+  const completed = new Set(options.completed ?? []);
+
+  for (const step of next.steps) {
+    if (completed.has(step.id)) {
+      step.status = "completed";
+      continue;
+    }
+    if (options.inProgress && step.id === options.inProgress) {
+      step.status = "in_progress";
+      continue;
+    }
+    if (step.status !== "completed") {
+      step.status = "pending";
+    }
+  }
+
+  return next;
 }
 
 export function phaseForTool(toolName: string): string {
@@ -78,6 +157,85 @@ export function phaseForTool(toolName: string): string {
       return "verifying";
     default:
       return "working";
+  }
+}
+
+function buildTurnPlan(taskKind: TaskKind, filePaths: string[], ambiguousEdit: boolean): TurnPlan {
+  const target = filePaths.length > 0 ? formatTargets(filePaths) : "the relevant code and nearby context";
+  switch (taskKind) {
+    case "audit":
+      return {
+        taskKind,
+        title: "Plan",
+        explanation: "Inspect first, then validate the riskiest paths before reporting concrete findings.",
+        steps: [
+          { id: "inspect", label: `Inspect ${target} and trust boundaries`, status: "pending" },
+          { id: "decide", label: "Decide which surfaces look riskiest", status: "pending" },
+          { id: "execute", label: "Validate concrete abuse paths and edge cases", status: "pending" },
+          { id: "summarize", label: "Summarize findings, impact, and mitigations", status: "pending" }
+        ]
+      };
+    case "review":
+      return {
+        taskKind,
+        title: "Plan",
+        explanation: "Inspect first, then review the likely regression points before summarizing findings.",
+        steps: [
+          { id: "inspect", label: `Inspect ${target} and surrounding context`, status: "pending" },
+          { id: "decide", label: "Decide the highest-risk review focus", status: "pending" },
+          { id: "execute", label: "Check regressions, edge cases, and test gaps", status: "pending" },
+          { id: "summarize", label: "Summarize findings with severity and references", status: "pending" }
+        ]
+      };
+    case "edit":
+      return {
+        taskKind,
+        title: "Plan",
+        explanation: ambiguousEdit
+          ? "Inspect first, clarify if the target stays fuzzy, then make the smallest safe change."
+          : "Inspect first, then make the smallest safe change and verify it.",
+        steps: [
+          { id: "inspect", label: `Inspect ${target} and the current constraints`, status: "pending" },
+          {
+            id: "decide",
+            label: ambiguousEdit ? "Clarify scope or choose the safest target" : "Choose the smallest safe change",
+            status: "pending"
+          },
+          { id: "execute", label: "Apply the change without broad churn", status: "pending" },
+          { id: "summarize", label: "Verify the result and summarize what changed", status: "pending" }
+        ]
+      };
+    case "research":
+      return {
+        taskKind,
+        title: "Plan",
+        explanation: "Gather the constraints first, then compare viable options before recommending a path.",
+        steps: [
+          { id: "inspect", label: `Inspect ${target} and the relevant constraints`, status: "pending" },
+          { id: "decide", label: "Decide which comparison criteria matter", status: "pending" },
+          { id: "execute", label: "Compare viable options and tradeoffs", status: "pending" },
+          { id: "summarize", label: "Recommend a path with concrete reasoning", status: "pending" }
+        ]
+      };
+    case "chat":
+      return {
+        taskKind,
+        title: "Plan",
+        explanation: null,
+        steps: []
+      };
+    default:
+      return {
+        taskKind,
+        title: "Plan",
+        explanation: "Inspect first, then trace the important flow before answering.",
+        steps: [
+          { id: "inspect", label: `Inspect ${target}`, status: "pending" },
+          { id: "decide", label: "Decide which flows or components matter most", status: "pending" },
+          { id: "execute", label: "Trace the main paths instead of guessing", status: "pending" },
+          { id: "summarize", label: "Explain the result with concrete references", status: "pending" }
+        ]
+      };
   }
 }
 
@@ -140,7 +298,7 @@ function scoreComplexity(
   }
   if (fileCount >= 2) {
     score += 2;
-  } else if (fileCount == 1) {
+  } else if (fileCount === 1) {
     score += 1;
   }
   if (normalized.split(/\s+/).length >= 14) {
@@ -234,6 +392,37 @@ function formatTargets(filePaths: string[]): string {
     return `${filePaths[0]} and ${filePaths[1]}`;
   }
   return `${filePaths[0]} and related files`;
+}
+
+function setStepStatus(plan: TurnPlan, stepId: TurnPlanStep["id"], status: TurnPlanStatus): void {
+  for (const step of plan.steps) {
+    if (step.id === stepId) {
+      step.status = status;
+      continue;
+    }
+    if (status === "in_progress" && step.status === "in_progress") {
+      step.status = "pending";
+    }
+  }
+}
+
+function completeStep(plan: TurnPlan, stepId: TurnPlanStep["id"]): void {
+  for (const step of plan.steps) {
+    if (step.id === stepId) {
+      step.status = "completed";
+    } else if (step.status === "in_progress") {
+      step.status = "pending";
+    }
+  }
+}
+
+function cloneTurnPlan(plan: TurnPlan): TurnPlan {
+  return {
+    taskKind: plan.taskKind,
+    title: plan.title,
+    explanation: plan.explanation,
+    steps: plan.steps.map((step) => ({ ...step }))
+  };
 }
 
 function containsAny(normalized: string, terms: string[]): boolean {

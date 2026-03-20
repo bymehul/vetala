@@ -197,6 +197,24 @@ func uiCopyLastKeys() []string {
 	return []string{"ctrl+y"}
 }
 
+func uiCopyTurnKeys() []string {
+	if value, ok := envString("VETALA_UI_COPY_TURN_KEYS"); ok {
+		fields := strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == ';' || r == '\t' || r == '\n'
+		})
+		var keys []string
+		for _, f := range fields {
+			if f != "" {
+				keys = append(keys, f)
+			}
+		}
+		if len(keys) > 0 {
+			return keys
+		}
+	}
+	return []string{"ctrl+k"}
+}
+
 func firstKey(keys []string, fallback string) string {
 	for _, k := range keys {
 		if strings.TrimSpace(k) != "" {

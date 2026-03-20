@@ -6,7 +6,7 @@ export function createSkillTools(skillRuntime: SkillRuntime): ToolSpec[] {
     {
       name: "skill",
       description:
-        "Inspect and manage local skills from the skill/ directory. Use this to list available skills, load a skill overview, read files within a skill, and pin or unpin skills for later turns.",
+        "Inspect and manage local skills from the skill/ directory. Use this when the user explicitly wants skill inspection or when the active preloaded skill guidance is insufficient and you need a specific deeper file.",
       jsonSchema: {
         type: "object",
         properties: {

@@ -1,6 +1,6 @@
 import { ApprovalManager } from "./approvals.js";
 import { compactConversation } from "./context-memory.js";
-import { analyzeTurnDeliberation, phaseForTool } from "./deliberation.js";
+import { advanceTurnPlan, analyzeTurnDeliberation, phaseForTool, updateTurnPlan } from "./deliberation.js";
 import { loadMemoriesPrompt, loadRulesPrompt } from "./context-files.js";
 import { appendHistoryEntry } from "./history-store.js";
 import { PathPolicy } from "./path-policy.js";
@@ -9,6 +9,8 @@ import { createSearchProvider } from "./search-provider.js";
 import { SessionStore } from "./session-store.js";
 import { TerminalUI } from "./terminal-ui.js";
 import { ToolRegistry } from "./tools/registry.js";
+import { formatTurnTargetList, resolveTurnTargets } from "./turn-targets.js";
+import type { TurnPlan, TurnPlanStage } from "./deliberation.js";
 import type { ChatProviderClient, ProviderRequestOptions } from "./providers/index.js";
 import type { SkillRuntime } from "./skills/runtime.js";
 import type {
@@ -19,8 +21,12 @@ import type {
   SessionState,
   StreamedAssistantTurn,
   ToolCall,
-  ToolContext
+  ToolContext,
+  ToolResult,
+  ToolVerification
 } from "./types.js";
+import type { TaskKind } from "./deliberation.js";
+import type { TurnTargetContext } from "./turn-targets.js";
 
 export interface InvalidToolCall {
   toolName: string;
@@ -53,6 +59,18 @@ export interface AgentOptions {
   ) => Promise<any[] | null>;
 }
 
+interface TurnVerificationRecord extends ToolVerification {
+  toolName: string;
+}
+
+const EMPTY_TURN_TARGETS: TurnTargetContext = {
+  taskKind: "chat",
+  explicitPaths: [],
+  explicitFiles: [],
+  explicitDirs: [],
+  preferredRoot: null
+};
+
 export class Agent {
   private readonly client: ChatProviderClient;
   private activeRequestController: AbortController | null = null;
@@ -62,6 +80,17 @@ export class Agent {
   private turnDeliberationPrompt: string | null = null;
   private turnReasoningEffort: "low" | "medium" | "high" | null = null;
   private turnReasoningLabel = "none";
+  private turnPlan: TurnPlan | null = null;
+  private turnPlanSignature = "";
+  private turnPlanInspected = false;
+  private turnPlanHasMutation = false;
+  private turnPlanHasVerification = false;
+  private turnTaskKind: TaskKind = "chat";
+  private turnTargets: TurnTargetContext = EMPTY_TURN_TARGETS;
+  private turnChangedFiles = new Set<string>();
+  private turnVerificationRecords: TurnVerificationRecord[] = [];
+  private turnNoOpEdits: string[] = [];
+  private turnVerificationNudges = 0;
 
   constructor(private readonly options: AgentOptions) {
     this.client = createProviderClient(options.config.providers[options.session.provider]);
@@ -82,6 +111,16 @@ export class Agent {
     this.activeTurnController = turnController;
     this.stopRequested = false;
     try {
+      this.turnPlanInspected = false;
+      this.turnPlanHasMutation = false;
+      this.turnPlanHasVerification = false;
+      this.turnTaskKind = "chat";
+      this.turnTargets = EMPTY_TURN_TARGETS;
+      this.turnChangedFiles.clear();
+      this.turnVerificationRecords = [];
+      this.turnNoOpEdits = [];
+      this.turnVerificationNudges = 0;
+      this.setTurnPlan(null);
       const userMessage = this.persistedMessage({
         role: "user",
         content: userInput
@@ -110,6 +149,13 @@ export class Agent {
         configuredEffort: providerDefinition.supportsReasoningEffort ? this.options.config.reasoningEffort : null,
         activeSkills: turnSkillContext.labels
       });
+      this.turnTaskKind = deliberation.taskKind;
+      this.turnTargets = await resolveTurnTargets(
+        userInput,
+        deliberation.taskKind,
+        this.options.pathPolicy,
+        this.options.session.workspaceRoot
+      );
       this.turnDeliberationPrompt = deliberation.guidance;
       this.turnReasoningEffort = providerDefinition.supportsReasoningEffort ? deliberation.reasoningEffort : null;
       this.turnReasoningLabel = deliberation.reasoningLabel;
@@ -117,8 +163,12 @@ export class Agent {
       if (deliberation.shouldShowThinking && deliberation.thinkingSummary) {
         this.options.ui.printThinking(deliberation.thinkingSummary);
       }
+      if (deliberation.plan) {
+        this.advanceCurrentPlan("inspect", deliberation.plan);
+      }
 
       if (!provider.authValue) {
+        this.setTurnPlan(null);
         const missingAuthMessage =
           provider.authSource === "stored_hash"
             ? `A stored SHA-256 fingerprint exists for ${providerDefinition.label}, but the raw credential is not available in this process. Use /model to enter the key again or set ${providerDefinition.auth.envVars.join(", ")}.`
@@ -252,6 +302,19 @@ export class Agent {
         await this.options.sessionStore.appendMessage(this.options.session, assistantMessage);
 
         if (partitionedToolCalls.validToolCalls.length === 0) {
+          const verificationPrompt = this.pendingVerificationPrompt();
+          if (verificationPrompt) {
+            this.turnVerificationNudges += 1;
+            await this.options.sessionStore.appendMessage(
+              this.options.session,
+              this.persistedMessage({
+                role: "user",
+                content: verificationPrompt
+              })
+            );
+            continue;
+          }
+          this.finalizeCurrentPlan();
           this.options.ui.endAssistantTurn();
           return;
         }
@@ -276,7 +339,7 @@ export class Agent {
             this.options.ui.updateTurnState(this.turnReasoningLabel, phaseForTool(toolCall.function.name));
             this.options.ui.activity(`Running ${toolCall.function.name}.`);
             const toolSpec = this.options.tools.getTool(toolCall.function.name);
-            const isMutating = toolSpec && !toolSpec.readOnly;
+            const isMutating = Boolean(toolSpec && !toolSpec.readOnly);
 
             try {
               result = await this.options.tools.execute(toolCall, this.toolContext(turnController));
@@ -287,6 +350,7 @@ export class Agent {
               }
               throw error;
             }
+            this.observeToolResult(toolCall.function.name, isMutating, result);
 
             if (result.isError) {
               seenToolCalls.delete(signature);
@@ -297,6 +361,7 @@ export class Agent {
 
           this.throwIfStopped();
           this.options.ui.printToolResult(result.summary, result.isError, result.content);
+          this.options.ui.activity("Thinking...");
           await this.options.sessionStore.appendMessage(
             this.options.session,
             this.persistedMessage({
@@ -325,6 +390,15 @@ export class Agent {
       this.turnDeliberationPrompt = null;
       this.turnReasoningEffort = null;
       this.turnReasoningLabel = "none";
+      this.turnTaskKind = "chat";
+      this.turnTargets = EMPTY_TURN_TARGETS;
+      this.turnChangedFiles.clear();
+      this.turnVerificationRecords = [];
+      this.turnNoOpEdits = [];
+      this.turnVerificationNudges = 0;
+      this.turnPlanInspected = false;
+      this.turnPlanHasMutation = false;
+      this.turnPlanHasVerification = false;
       this.options.ui.updateTurnState(null, null);
     }
   }
@@ -407,6 +481,14 @@ export class Agent {
     return {
       cwd: process.cwd(),
       workspaceRoot: this.options.session.workspaceRoot,
+      turn: {
+        taskKind: this.turnTaskKind,
+        explicitPaths: [...this.turnTargets.explicitPaths],
+        explicitFiles: [...this.turnTargets.explicitFiles],
+        explicitDirs: [...this.turnTargets.explicitDirs],
+        preferredRoot: this.turnTargets.preferredRoot,
+        changedFiles: [...this.turnChangedFiles]
+      },
       lifecycle: {
         signal: turnController.signal,
         throwIfAborted: () => {
@@ -499,8 +581,12 @@ export class Agent {
       "When using tools, emit valid JSON object arguments only.",
       "Prefer smaller tool calls over giant payloads. Break large refactors and large apply_patch edits into multiple steps.",
       "When the user names a concrete file path, read that file directly with read_file or read_file_chunk before considering search_repo.",
+      "If the user named concrete files or directories, stay scoped to them unless you have concrete evidence that broader repo context is required.",
+      "When active skill guidance is already injected below, use it directly. Do not call the skill tool again unless you need a specific deeper file that is not already summarized.",
       "For non-trivial tasks, form a concise plan before acting and execute it incrementally.",
       "If the target, scope, or acceptance criteria remain unclear after initial inspection, use ask_user before editing.",
+      "For source-file edits, prefer targeted diagnostics on the named file or changed file before and after editing when available.",
+      "Do not claim a build, test, or diagnostics check verified your change unless the tool output explicitly supports that claim.",
       "For Git-aware tasks, prefer the dedicated git tools over ad-hoc shell commands.",
       "For change review, start with git_review targeting the full worktree so you cover staged, unstaged, and untracked files.",
       "For branch review, compare against the merge base with the requested base branch instead of assuming HEAD~1 or the previous commit.",
@@ -517,12 +603,30 @@ export class Agent {
 
     lines.push("", skillInventory);
 
+    if (this.turnTargets.explicitPaths.length > 0) {
+      lines.push(
+        "",
+        [
+          "Concrete turn targets:",
+          `- named targets: ${formatTurnTargetList(this.turnTargets.explicitPaths, this.options.session.workspaceRoot)}`,
+          this.turnTargets.preferredRoot
+            ? `- preferred root: ${formatTurnTargetList([this.turnTargets.preferredRoot], this.options.session.workspaceRoot)}`
+            : "- preferred root: (none)"
+        ].join("\n")
+      );
+    }
+
     if (this.turnSkillPrompt) {
       lines.push("", this.turnSkillPrompt);
     }
 
     if (this.turnDeliberationPrompt) {
       lines.push("", this.turnDeliberationPrompt);
+    }
+
+    const executionPrompt = this.currentExecutionPrompt();
+    if (executionPrompt) {
+      lines.push("", executionPrompt);
     }
 
     if (persistentMemory) {
@@ -534,6 +638,70 @@ export class Agent {
     }
 
     return lines.join("\n");
+  }
+
+  private currentExecutionPrompt(): string | null {
+    const lines: string[] = [];
+
+    if (this.turnChangedFiles.size > 0) {
+      lines.push(`- changed files: ${formatTurnTargetList([...this.turnChangedFiles], this.options.session.workspaceRoot)}`);
+    }
+
+    if (this.turnVerificationRecords.length > 0) {
+      const latest = this.turnVerificationRecords[this.turnVerificationRecords.length - 1]!;
+      lines.push(
+        `- latest verification: ${latest.toolName} -> ${latest.trusted ? "trusted" : "untrusted"} / ${latest.passed ? "passed" : "failed"}`
+      );
+      if (latest.reason) {
+        lines.push(`- verification note: ${latest.reason}`);
+      }
+    } else if (this.turnChangedFiles.size > 0) {
+      lines.push("- verification: none yet");
+    }
+
+    if (this.turnNoOpEdits.length > 0) {
+      lines.push(`- no-op edit attempts: ${this.turnNoOpEdits.length}`);
+    }
+
+    if (lines.length === 0) {
+      return null;
+    }
+
+    return [
+      "Current turn execution state:",
+      ...lines,
+      "- Only summarize changes that actually happened in the changed files listed above.",
+      "- If verification is missing or untrusted, verify first or explicitly say so."
+    ].join("\n");
+  }
+
+  private pendingVerificationPrompt(): string | null {
+    if (this.turnTaskKind !== "edit" || !this.turnPlanHasMutation || this.turnPlanHasVerification) {
+      return null;
+    }
+
+    if (this.turnVerificationNudges >= 3) {
+      return null;
+    }
+
+    const changedFiles = [...this.turnChangedFiles];
+    const targets = changedFiles.length > 0 ? changedFiles : this.turnTargets.explicitFiles;
+    const formattedTargets = formatTurnTargetList(targets, this.options.session.workspaceRoot);
+
+    if (this.turnVerificationNudges >= 2) {
+      return [
+        "SYSTEM ALERT: Trustworthy verification is still missing for this edit.",
+        `Changed or named targets: ${formattedTargets}.`,
+        "If you cannot verify in this environment, say that explicitly and do not claim the change is verified or all tests passed."
+      ].join("\n");
+    }
+
+    return [
+      "SYSTEM ALERT: You changed files but have not yet produced trustworthy verification for them.",
+      `Changed or named targets: ${formattedTargets}.`,
+      "Before finalizing, run get_diagnostics on the changed file or run a build/test/check command that actually validates the changed scope.",
+      "Do not claim success until verification is trustworthy."
+    ].join("\n");
   }
 
   private beginRequest(): ProviderRequestOptions {
@@ -552,6 +720,104 @@ export class Agent {
     if (this.stopRequested) {
       throw new AgentInterruptedError();
     }
+  }
+
+  private advanceCurrentPlan(stage: TurnPlanStage, planOverride?: TurnPlan | null): void {
+    const next = advanceTurnPlan(planOverride ?? this.turnPlan, stage);
+    this.setTurnPlan(next);
+  }
+
+  private observeToolResult(toolName: string, isMutating: boolean, result: ToolResult): void {
+    const phase = phaseForTool(toolName);
+    const meta = result.meta;
+
+    if (meta?.noOp) {
+      this.turnNoOpEdits.push(result.summary);
+    }
+
+    for (const changedFile of meta?.changedFiles ?? []) {
+      this.turnChangedFiles.add(changedFile);
+    }
+
+    if (meta?.verification) {
+      this.turnVerificationRecords.push({
+        ...meta.verification,
+        toolName
+      });
+    }
+
+    const inspected = meta?.inspectedPaths?.length ? meta.inspectedPaths : [];
+    if ((inspected.length > 0 || (phase === "inspecting" && !result.isError)) && !this.turnPlanInspected) {
+      this.turnPlanInspected = true;
+      this.setTurnPlan(updateTurnPlan(this.turnPlan, {
+        completed: ["inspect"],
+        inProgress: "decide"
+      }));
+    }
+
+    if (isMutating && !result.isError && (meta?.changedFiles?.length ?? 0) > 0) {
+      this.turnPlanHasMutation = true;
+      this.setTurnPlan(updateTurnPlan(this.turnPlan, {
+        completed: ["inspect", "decide"],
+        inProgress: "execute"
+      }));
+    }
+
+    if (
+      meta?.verification &&
+      meta.verification.trusted &&
+      meta.verification.passed &&
+      this.turnPlanHasMutation
+    ) {
+      this.turnPlanHasVerification = true;
+      this.setTurnPlan(updateTurnPlan(this.turnPlan, {
+        completed: ["inspect", "decide", "execute"],
+        inProgress: "summarize"
+      }));
+    }
+  }
+
+  private finalizeCurrentPlan(): void {
+    if (!this.turnPlan) {
+      return;
+    }
+
+    if (this.turnPlan.taskKind === "edit") {
+      if (this.turnPlanHasMutation && this.turnPlanHasVerification) {
+        this.advanceCurrentPlan("complete");
+        return;
+      }
+
+      if (this.turnPlanHasMutation) {
+        this.setTurnPlan(updateTurnPlan(this.turnPlan, {
+          completed: ["inspect", "decide", "execute"],
+          inProgress: null
+        }));
+        return;
+      }
+
+      if (this.turnPlanInspected) {
+        this.setTurnPlan(updateTurnPlan(this.turnPlan, {
+          completed: ["inspect"],
+          inProgress: "decide"
+        }));
+      }
+      return;
+    }
+
+    if (this.turnPlanInspected) {
+      this.advanceCurrentPlan("complete");
+    }
+  }
+
+  private setTurnPlan(plan: TurnPlan | null): void {
+    this.turnPlan = cloneTurnPlan(plan);
+    const signature = this.turnPlan ? JSON.stringify(this.turnPlan) : "";
+    if (signature === this.turnPlanSignature) {
+      return;
+    }
+    this.turnPlanSignature = signature;
+    this.options.ui.updatePlan(cloneTurnPlan(this.turnPlan));
   }
 }
 
@@ -805,4 +1071,16 @@ function emptyResponseWarningMessage(): string {
     return envMessage.trim();
   }
   return "Model returned an empty response (possible context limit). Try resuming with a shorter scope.";
+}
+
+function cloneTurnPlan(plan: TurnPlan | null): TurnPlan | null {
+  if (!plan) {
+    return null;
+  }
+  return {
+    taskKind: plan.taskKind,
+    title: plan.title,
+    explanation: plan.explanation,
+    steps: plan.steps.map((step) => ({ ...step }))
+  };
 }

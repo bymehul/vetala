@@ -21,7 +21,10 @@ const MAX_HEADINGS = 8;
 const MAX_LINKS = 12;
 const MAX_PINNED_PROMPT_CHARS = 2_200;
 const MAX_AUTO_APPLY_SKILLS = 2;
-const MAX_TURN_PROMPT_CHARS = 2_600;
+const MAX_TURN_PROMPT_CHARS = 4_200;
+const MAX_TURN_SKILL_BODY_CHARS = 1_200;
+const MAX_TURN_RULE_SNIPPET_CHARS = 900;
+const MAX_TURN_RULE_FILES = 2;
 const ROUTING_SCORE_THRESHOLD = 18;
 
 interface SkillRuntimeOptions {
@@ -165,7 +168,7 @@ export class SkillRuntime implements SkillToolApi {
     return {
       active,
       labels: active.map(formatActiveSkillLabel),
-      prompt: await buildTurnSkillPrompt(active)
+      prompt: await buildTurnSkillPrompt(active, routingInput)
     };
   }
 
@@ -602,6 +605,18 @@ function scoreSkillMatch(skill: SkillCatalogEntry, input: SkillRoutingInput): Ac
     score += 18 + Math.max(0, taskTypeHits.length-1)*6;
   }
 
+  const nameHits = countNameTokenMatches(skill.name, input.inputTokens);
+  if (nameHits.length > 0) {
+    reasons.push(`name: ${nameHits[0]}`);
+    score += 16 + Math.max(0, nameHits.length-1)*4;
+  }
+
+  const descriptionHits = countDescriptionTokenMatches(skill.description, input.inputTokens);
+  if (descriptionHits.length > 0) {
+    reasons.push(`context: ${descriptionHits[0]}`);
+    score += 12 + Math.max(0, descriptionHits.length-1)*3;
+  }
+
   const pathHits = countPathMatches(skill.routing.pathGlobs, input.pathCandidates);
   if (pathHits.length > 0) {
     reasons.push(`path: ${pathHits[0]}`);
@@ -609,6 +624,17 @@ function scoreSkillMatch(skill: SkillCatalogEntry, input: SkillRoutingInput): Ac
   }
 
   if (!explicitMention && !skill.routing.autoApply) {
+    return null;
+  }
+
+  const hasSemanticMatch =
+    explicitMention ||
+    keywordHits.length > 0 ||
+    taskTypeHits.length > 0 ||
+    nameHits.length > 0 ||
+    descriptionHits.length > 0;
+
+  if (!explicitMention && !hasSemanticMatch) {
     return null;
   }
 
@@ -635,12 +661,18 @@ function compareActiveSkillMatches(left: ActiveSkillMatch, right: ActiveSkillMat
   return left.name.localeCompare(right.name);
 }
 
-async function buildTurnSkillPrompt(matches: ActiveSkillMatch[]): Promise<string | null> {
+async function buildTurnSkillPrompt(matches: ActiveSkillMatch[], input: SkillRoutingInput): Promise<string | null> {
   if (matches.length === 0) {
     return null;
   }
 
-  const lines = ["Apply these local skills when they are relevant to the user's request:"];
+  const lines = [
+    "Active local skill guidance is already injected below.",
+    "Use it directly before calling the skill tool again.",
+    "Only call the skill tool if you need a specific deeper file that is not already summarized here.",
+    "",
+    "Apply these local skills when they are relevant to the user's request:"
+  ];
 
   for (const match of matches) {
     lines.push(`- ${match.name} [${match.source}] - ${shorten(match.description, 180)}`);
@@ -661,11 +693,27 @@ async function buildTurnSkillPrompt(matches: ActiveSkillMatch[]): Promise<string
     const body = stripFrontmatter(raw).trim();
     const headings = extractHeadings(body);
     const linkedFiles = extractLinkedFiles(body);
+    const bodyExcerpt = body.length > MAX_TURN_SKILL_BODY_CHARS
+      ? `${body.slice(0, MAX_TURN_SKILL_BODY_CHARS - 3).trimEnd()}...`
+      : body;
     if (headings.length > 0) {
       lines.push(`  sections: ${formatList(headings, 4)}`);
     }
     if (linkedFiles.length > 0) {
       lines.push(`  files: ${formatList(linkedFiles, 4)}`);
+    }
+    if (bodyExcerpt) {
+      lines.push("  overview:");
+      lines.push(indentBlock(bodyExcerpt, "    "));
+    }
+
+    const relevantFiles = await selectRelevantSkillFiles(match, input);
+    for (const file of relevantFiles) {
+      lines.push(`  file: ${file.path}`);
+      lines.push(indentBlock(file.content, "    "));
+      if (lines.join("\n").length > MAX_TURN_PROMPT_CHARS) {
+        break;
+      }
     }
 
     if (lines.join("\n").length > MAX_TURN_PROMPT_CHARS) {
@@ -674,6 +722,94 @@ async function buildTurnSkillPrompt(matches: ActiveSkillMatch[]): Promise<string
   }
 
   return lines.join("\n");
+}
+
+async function selectRelevantSkillFiles(
+  match: ActiveSkillMatch,
+  input: SkillRoutingInput
+): Promise<Array<{ path: string; content: string }>> {
+  const candidates = match.availableFiles
+    .filter((file) => file !== "SKILL.md")
+    .map((file) => ({ file, score: scoreSkillFileCandidate(file, input) }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || left.file.localeCompare(right.file))
+    .slice(0, MAX_TURN_RULE_FILES);
+
+  const loaded: Array<{ path: string; content: string }> = [];
+  for (const candidate of candidates) {
+    try {
+      const raw = await readFile(path.join(match.rootPath, candidate.file), "utf8");
+      const excerpt = buildSkillFileExcerpt(raw);
+      if (!excerpt) {
+        continue;
+      }
+      loaded.push({ path: candidate.file, content: excerpt });
+    } catch {
+      // Ignore unreadable skill support files in prompt injection.
+    }
+  }
+
+  return loaded;
+}
+
+function scoreSkillFileCandidate(file: string, input: SkillRoutingInput): number {
+  const normalizedPath = normalizeForMatch(file);
+  const pathTokens = tokenizeForMatch(file);
+  let score = 0;
+
+  for (const token of pathTokens) {
+    if (input.inputTokens.has(token)) {
+      score += 3;
+    }
+  }
+
+  if (input.pathCandidates.some((candidate) => normalizedPath.includes(normalizeForMatch(candidate).trim()))) {
+    score += 4;
+  }
+
+  return score;
+}
+
+function buildSkillFileExcerpt(raw: string): string {
+  const content = raw.trim();
+  if (!content) {
+    return "";
+  }
+
+  const frontmatter = content.match(FRONTMATTER_RE)?.[1] ?? "";
+  const body = stripFrontmatter(content).trim();
+  const rendered: string[] = [];
+
+  if (frontmatter) {
+    const title = frontmatter.match(/^title:\s*(.*)$/m)?.[1]?.trim();
+    const impact = frontmatter.match(/^impact:\s*(.*)$/m)?.[1]?.trim();
+    const tags = frontmatter.match(/^tags:\s*(.*)$/m)?.[1]?.trim();
+    if (title) {
+      rendered.push(`title: ${title}`);
+    }
+    if (impact) {
+      rendered.push(`impact: ${impact}`);
+    }
+    if (tags) {
+      rendered.push(`tags: ${tags}`);
+    }
+  }
+
+  if (body) {
+    const excerpt = body.length > MAX_TURN_RULE_SNIPPET_CHARS
+      ? `${body.slice(0, MAX_TURN_RULE_SNIPPET_CHARS - 3).trimEnd()}...`
+      : body;
+    rendered.push(excerpt);
+  }
+
+  return rendered.join("\n");
+}
+
+function indentBlock(text: string, prefix: string): string {
+  return text
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
 }
 
 function formatActiveSkillLabel(match: ActiveSkillMatch): string {
@@ -723,12 +859,44 @@ function countTaggedMatches(tags: string[], normalizedInput: string, inputTokens
   });
 }
 
+function countNameTokenMatches(skillName: string, inputTokens: Set<string>): string[] {
+  return tokenizeForMatch(skillName)
+    .filter((token) => token.length >= 4)
+    .filter((token) => !GENERIC_SKILL_TOKENS.has(token))
+    .filter((token) => inputTokens.has(token));
+}
+
+function countDescriptionTokenMatches(description: string, inputTokens: Set<string>): string[] {
+  return tokenizeForMatch(description)
+    .filter((token) => token.length >= 5)
+    .filter((token) => !GENERIC_SKILL_TOKENS.has(token))
+    .filter((token) => inputTokens.has(token))
+    .slice(0, 3);
+}
+
 function countPathMatches(globs: string[], candidates: string[]): string[] {
   if (globs.length === 0 || candidates.length === 0) {
     return [];
   }
   return globs.filter((glob) => candidates.some((candidate) => matchesGlob(candidate, glob)));
 }
+
+const GENERIC_SKILL_TOKENS = new Set([
+  "agent",
+  "agents",
+  "audit",
+  "best",
+  "code",
+  "guide",
+  "guidelines",
+  "patterns",
+  "performance",
+  "practices",
+  "review",
+  "security",
+  "skill",
+  "skills"
+]);
 
 function matchesGlob(filePath: string, glob: string): boolean {
   const normalized = toForwardSlashes(filePath);

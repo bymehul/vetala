@@ -27,6 +27,7 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	t.Setenv("VETALA_UI_INPUT_BG_LIGHT", "250")
 	t.Setenv("VETALA_UI_TOGGLE_TOOL_KEYS", "alt+t,ctrl+shift+t")
 	t.Setenv("VETALA_UI_COPY_LAST_KEYS", "ctrl+y,alt+c")
+	t.Setenv("VETALA_UI_COPY_TURN_KEYS", "ctrl+k,alt+k")
 	t.Setenv("VETALA_UI_KEY_DEBUG", "true")
 	t.Setenv("VETALA_UI_MOUSE_MODE", "cell")
 	t.Setenv("VETALA_UI_ALT_SCREEN", "false")
@@ -79,6 +80,9 @@ func TestUiConfigEnvOverrides(t *testing.T) {
 	}
 	if got := uiCopyLastKeys(); len(got) != 2 || got[0] != "ctrl+y" || got[1] != "alt+c" {
 		t.Fatalf("expected uiCopyLastKeys to honor env override, got %v", got)
+	}
+	if got := uiCopyTurnKeys(); len(got) != 2 || got[0] != "ctrl+k" || got[1] != "alt+k" {
+		t.Fatalf("expected uiCopyTurnKeys to honor env override, got %v", got)
 	}
 	if got := uiKeyDebugEnabled(); !got {
 		t.Fatal("expected uiKeyDebugEnabled to honor env override")
@@ -217,5 +221,84 @@ func TestRenderFooterIncludesActiveSkills(t *testing.T) {
 	}
 	if !strings.Contains(footer, "reasoning: high") || !strings.Contains(footer, "phase: planning") {
 		t.Fatalf("expected footer to include turn reasoning and phase, got %q", footer)
+	}
+	if !strings.Contains(footer, "Ctrl+K copy turn") {
+		t.Fatalf("expected footer to advertise copy-turn shortcut, got %q", footer)
+	}
+}
+
+func TestRenderLiveStatusIncludesPlanProgress(t *testing.T) {
+	m := initialModel(nil)
+	m.width = 100
+	m.height = 30
+	m.currentPlan = PlanUpdateData{
+		Title:       "Plan",
+		Explanation: "Inspect first, then explain the main flow.",
+		Steps: []PlanStepData{
+			{Id: "inspect", Label: "Inspect src/agent.ts and nearby files", Status: "completed"},
+			{Id: "decide", Label: "Decide which flows matter most", Status: "in_progress"},
+			{Id: "execute", Label: "Trace the main execution path", Status: "pending"},
+		},
+	}
+
+	live := m.renderLiveStatus()
+	if !strings.Contains(live, "Plan") {
+		t.Fatalf("expected live status to include a plan block, got %q", live)
+	}
+	if !strings.Contains(live, "[x]") || !strings.Contains(live, "[>]") || !strings.Contains(live, "[ ]") {
+		t.Fatalf("expected live status to include checkbox markers, got %q", live)
+	}
+	if !strings.Contains(live, "Trace the main execution path") {
+		t.Fatalf("expected live status to include plan step labels, got %q", live)
+	}
+}
+
+func TestLastTurnLogTextIncludesPlanActivityAndStatus(t *testing.T) {
+	m := initialModel(nil)
+	m.status = "Running agent"
+	m.running = true
+	m.skillLabels = []string{"react-best-practices (auto)"}
+	m.turnReasoning = "high"
+	m.turnPhase = "inspecting"
+	m.entries = []EntryData{
+		{Kind: "assistant", Text: "Earlier reply"},
+		{Kind: "user", Text: "refactor test-react/App.tsx"},
+		{Kind: "thinking", Text: "- inspect file\n- make one change"},
+		{Kind: "tool", Text: "⬢  read_file\n{\n  \"path\": \"test-react/App.tsx\"\n}"},
+		{Kind: "assistant", Text: "I found one small cleanup."},
+	}
+	m.currentPlan = PlanUpdateData{
+		Title:       "Plan",
+		Explanation: "Inspect first, then edit safely.",
+		Steps: []PlanStepData{
+			{Id: "inspect", Label: "Inspect App.tsx", Status: "completed"},
+			{Id: "execute", Label: "Apply one small change", Status: "in_progress"},
+		},
+	}
+	activity := "Running replace_in_file."
+	m.activity = &activity
+	m.liveBuffer = "Drafting final summary"
+
+	got := m.lastTurnLogText()
+	if !strings.Contains(got, "user\n  refactor test-react/App.tsx") {
+		t.Fatalf("expected last turn log to start from the last user turn, got %q", got)
+	}
+	if strings.Contains(got, "Earlier reply") {
+		t.Fatalf("expected earlier turns to be excluded, got %q", got)
+	}
+	if !strings.Contains(got, "Plan\nInspect first, then edit safely.") {
+		t.Fatalf("expected plan block in copied turn log, got %q", got)
+	}
+	if !strings.Contains(got, "[x] Inspect App.tsx") || !strings.Contains(got, "[>] Apply one small change") {
+		t.Fatalf("expected plan steps in copied turn log, got %q", got)
+	}
+	if !strings.Contains(got, "doing\n  Running replace_in_file.") {
+		t.Fatalf("expected live activity in copied turn log, got %q", got)
+	}
+	if !strings.Contains(got, "assistant\n  Drafting final summary") {
+		t.Fatalf("expected live assistant buffer in copied turn log, got %q", got)
+	}
+	if !strings.Contains(got, "skills: react-best-practices (auto)") || !strings.Contains(got, "reasoning: high") || !strings.Contains(got, "phase: inspecting") {
+		t.Fatalf("expected status footer context in copied turn log, got %q", got)
 	}
 }

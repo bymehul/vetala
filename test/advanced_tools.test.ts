@@ -123,6 +123,20 @@ test("get_diagnostics detects missing projects", async () => {
   assert.match(result.content, /Could not detect a project type/);
 });
 
+test("get_diagnostics can validate a specific file path", async () => {
+  const { root, ctx } = await createTempContext();
+  const tools = createLspTools();
+  const diagTool = tools.find(t => t.name === "get_diagnostics")!;
+
+  const broken = path.join(root, "Broken.tsx");
+  await writeFile(broken, "export function Broken() {\n  return <div>\n}\n", "utf8");
+
+  const result = await diagTool.execute({ path: broken }, ctx);
+  assert.equal(result.meta?.verification?.trusted, true);
+  assert.equal(result.meta?.verification?.scopePaths?.[0], broken);
+  assert.equal(result.isError, true);
+});
+
 test("find_references tool falls back to searchRepo", async () => {
   const { root, ctx } = await createTempContext();
   const tools = createLspTools();

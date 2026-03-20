@@ -7,7 +7,7 @@ import { partitionToolCalls, sanitizeConversationMessages } from "../src/agent.j
 import { undoLastEdit } from "../src/edit-history.js";
 import { ApprovalManager } from "../src/approvals.js";
 import { compactConversation } from "../src/context-memory.js";
-import { analyzeTurnDeliberation, phaseForTool } from "../src/deliberation.js";
+import { advanceTurnPlan, analyzeTurnDeliberation, phaseForTool, updateTurnPlan } from "../src/deliberation.js";
 import { appendHistoryEntry } from "../src/history-store.js";
 import {
   clearSavedAuth,
@@ -198,7 +198,7 @@ test("Package metadata stays in sync with the bundled TUI launcher", async () =>
     files?: string[];
   };
 
-  assert.equal(pkg.version, "0.5.6");
+  assert.equal(pkg.version, "0.6.0");
   assert.deepEqual(
     EXPECTED_TUI_FILES.filter((filePath) => !pkg.files?.includes(filePath)),
     []
@@ -497,7 +497,10 @@ test("analyzeTurnDeliberation raises reasoning for non-trivial review tasks", ()
   assert.equal(deliberation.reasoningEffort, "high");
   assert.equal(deliberation.reasoningLabel, "high");
   assert.equal(deliberation.shouldShowThinking, true);
+  assert.equal(deliberation.plan?.taskKind, "review");
   assert.match(deliberation.thinkingSummary ?? "", /inspect test-react\/App\.tsx/i);
+  assert.equal(deliberation.plan?.steps[0]?.id, "inspect");
+  assert.match(deliberation.plan?.steps[2]?.label ?? "", /regressions/i);
 });
 
 test("analyzeTurnDeliberation prefers clarification guidance for ambiguous edit requests", () => {
@@ -506,6 +509,51 @@ test("analyzeTurnDeliberation prefers clarification guidance for ambiguous edit 
   assert.equal(deliberation.reasoningEffort, "medium");
   assert.match(deliberation.guidance ?? "", /ask_user/i);
   assert.match(deliberation.thinkingSummary ?? "", /clarifying question/i);
+  assert.match(deliberation.plan?.steps[1]?.label ?? "", /clarify scope/i);
+});
+
+test("advanceTurnPlan progresses non-trivial work from inspection to completion", () => {
+  const deliberation = analyzeTurnDeliberation("explain this codebase", { configuredEffort: null });
+  const initial = advanceTurnPlan(deliberation.plan, "inspect");
+  const decided = advanceTurnPlan(initial, "decide");
+  const executing = advanceTurnPlan(decided, "execute");
+  const completed = advanceTurnPlan(executing, "complete");
+
+  assert.equal(initial?.steps[0]?.status, "in_progress");
+  assert.equal(decided?.steps[0]?.status, "completed");
+  assert.equal(decided?.steps[1]?.status, "in_progress");
+  assert.equal(executing?.steps[2]?.status, "in_progress");
+  assert.deepEqual(
+    completed?.steps.map((step) => step.status),
+    ["completed", "completed", "completed", "completed"]
+  );
+});
+
+test("updateTurnPlan keeps execution pending until there is real change evidence", () => {
+  const deliberation = analyzeTurnDeliberation(
+    "refactor test-react/App.tsx using better React patterns and improve that",
+    { configuredEffort: null }
+  );
+
+  const afterInspect = updateTurnPlan(deliberation.plan, {
+    completed: ["inspect"],
+    inProgress: "decide"
+  });
+
+  assert.deepEqual(
+    afterInspect?.steps.map((step) => step.status),
+    ["completed", "in_progress", "pending", "pending"]
+  );
+
+  const afterEdit = updateTurnPlan(afterInspect, {
+    completed: ["inspect", "decide"],
+    inProgress: "execute"
+  });
+
+  assert.deepEqual(
+    afterEdit?.steps.map((step) => step.status),
+    ["completed", "completed", "in_progress", "pending"]
+  );
 });
 
 test("phaseForTool maps core tools into codex-like execution phases", () => {
@@ -686,6 +734,8 @@ test("SkillRuntime resolves auto-applied skills from routing metadata and file c
       assert.deepEqual(context.labels, ["ui-review (auto)"]);
       assert.match(context.prompt ?? "", /ui-review \[auto\]/);
       assert.match(context.prompt ?? "", /path globs: src\/\*\*\/\*\.tsx/);
+      assert.match(context.prompt ?? "", /Active local skill guidance is already injected below/);
+      assert.match(context.prompt ?? "", /# UI Review/);
 
       const loaded = await runtime.loadSkill("ui-review");
       assert.match(loaded.overview, /Auto apply: yes/);
@@ -761,6 +811,72 @@ test("SkillRuntime keeps pinned skills ahead of auto-matched skills", async () =
       assert.deepEqual(context.labels, ["manual-guide (pinned)", "mobile-perf (auto)"]);
       assert.match(context.prompt ?? "", /manual-guide \[pinned\]/);
       assert.match(context.prompt ?? "", /mobile-perf \[auto\]/);
+    } finally {
+      if (originalSkillRoot === undefined) {
+        delete process.env.VETALA_SKILL_ROOT;
+      } else {
+        process.env.VETALA_SKILL_ROOT = originalSkillRoot;
+      }
+    }
+  });
+});
+
+test("SkillRuntime ignores broad path-only security skills on React refactors", async () => {
+  await withIsolatedXdg(async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "vetala-skill-signal-"));
+    const skillRoot = path.join(tempRoot, "skill");
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "vetala-skill-signal-workspace-"));
+    const originalSkillRoot = process.env.VETALA_SKILL_ROOT;
+
+    await writeSkillFixture(skillRoot, "code-security-audit", [
+      "name: code-security-audit",
+      "description: Performs OWASP-based code security audits and vulnerability analysis.",
+      "task_types:",
+      "  - security audit",
+      "  - vulnerability analysis",
+      "path_globs:",
+      "  - **/*.tsx",
+      "priority: 5",
+      "auto_apply: true"
+    ], [
+      "# Security Audit",
+      "",
+      "Audit for OWASP issues."
+    ]);
+    await writeSkillFixture(skillRoot, "react-best-practices", [
+      "name: react-best-practices",
+      "description: React refactor and performance guidance.",
+      "keywords:",
+      "  - react refactor",
+      "task_types:",
+      "  - frontend performance",
+      "path_globs:",
+      "  - **/*.tsx",
+      "priority: 4",
+      "auto_apply: true"
+    ], [
+      "# React Best Practices",
+      "",
+      "Use smaller component boundaries."
+    ]);
+
+    await mkdir(path.join(workspace, "test-react"), { recursive: true });
+    await writeFile(path.join(workspace, "test-react", "App.tsx"), "export function App() { return null; }\n", "utf8");
+
+    process.env.VETALA_SKILL_ROOT = skillRoot;
+
+    try {
+      const store = new SessionStore();
+      const session = await store.createSession(workspace, "sarvam-105b");
+      const runtime = new SkillRuntime({
+        getSession: () => session,
+        sessionStore: store
+      });
+
+      const context = await runtime.resolveTurnContext("refactor test-react/App.tsx using better React patterns");
+
+      assert.deepEqual(context.labels, ["react-best-practices (auto)"]);
+      assert.equal(context.active.some((entry) => entry.name === "code-security-audit"), false);
     } finally {
       if (originalSkillRoot === undefined) {
         delete process.env.VETALA_SKILL_ROOT;
@@ -978,6 +1094,101 @@ test("search_repo short-circuits explicit file path queries", async () => {
     assert.match(result.summary, /Query resolves to file/);
     assert.match(result.content, /Use read_file or read_file_chunk/i);
     assert.deepEqual(result.referencedFiles, [path.join(root, "test-react", "App.tsx")]);
+  });
+});
+
+test("search_repo defaults to the named target root for file-scoped turns", async () => {
+  await withIsolatedXdg(async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "vetala-search-target-root-"));
+    await mkdir(path.join(root, "test-react"), { recursive: true });
+    await mkdir(path.join(root, "src"), { recursive: true });
+    const appPath = path.join(root, "test-react", "App.tsx");
+    await writeFile(appPath, "const SearchInput = 1;\n", "utf8");
+    await writeFile(path.join(root, "src", "App.tsx"), "const SearchInput = 2;\n", "utf8");
+
+    const store = new SessionStore();
+    const session = await store.createSession(root, "sarvam-105b");
+    const tools = createToolRegistry({ includeWebSearch: false });
+    const context = createTestToolContext(root, session, store);
+    context.turn = {
+      taskKind: "edit",
+      explicitPaths: [appPath],
+      explicitFiles: [appPath],
+      explicitDirs: [],
+      preferredRoot: path.join(root, "test-react"),
+      changedFiles: []
+    };
+
+    const result = await tools.execute(
+      toolCall("search_repo", {
+        query: "SearchInput"
+      }),
+      context
+    );
+
+    assert.equal(result.isError, false);
+    assert.match(result.content, /test-react\/App\.tsx:1:const SearchInput = 1;/);
+    assert.doesNotMatch(result.content, /src\/App\.tsx/);
+  });
+});
+
+test("replace_in_file rejects no-op edits", async () => {
+  await withIsolatedXdg(async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "vetala-noop-edit-"));
+    const filePath = path.join(root, "demo.ts");
+    await writeFile(filePath, "const value = 1;\n", "utf8");
+
+    const store = new SessionStore();
+    const session = await store.createSession(root, "sarvam-105b");
+    const tools = createToolRegistry({ includeWebSearch: false });
+    const context = createTestToolContext(root, session, store);
+
+    await tools.execute(toolCall("read_file", { path: filePath }), context);
+    const result = await tools.execute(
+      toolCall("replace_in_file", {
+        path: filePath,
+        search: "const value = 1;",
+        replace: "const value = 1;"
+      }),
+      context
+    );
+
+    assert.equal(result.isError, true);
+    assert.match(result.content, /No-op edit/i);
+  });
+});
+
+test("bash marks package-manager verification from a non-package subdir as untrusted", async () => {
+  await withIsolatedXdg(async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "vetala-shell-verify-"));
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "shell-verify-test",
+        private: true,
+        scripts: {
+          build: "node -e \"console.log('ok')\""
+        }
+      }, null, 2),
+      "utf8"
+    );
+    await mkdir(path.join(root, "subdir"), { recursive: true });
+
+    const store = new SessionStore();
+    const session = await store.createSession(root, "sarvam-105b");
+    const tools = createToolRegistry({ includeWebSearch: false });
+    const context = createTestToolContext(root, session, store);
+
+    const result = await tools.execute(
+      toolCall("bash", {
+        command: `cd ${path.join(root, "subdir")} && npm run build`
+      }),
+      context
+    );
+
+    assert.equal(result.isError, false);
+    assert.equal(result.meta?.verification?.trusted, false);
+    assert.match(result.content, /may verify the wrong project/i);
   });
 });
 

@@ -1,4 +1,6 @@
-import type { ToolContext, ToolSpec } from "../types.js";
+import path from "node:path";
+import { access } from "node:fs/promises";
+import type { ToolContext, ToolResult, ToolSpec, ToolVerification } from "../types.js";
 import { runShellCommand } from "../process-utils.js";
 
 const READ_ONLY_COMMANDS = new Set([
@@ -76,18 +78,23 @@ const runShellTool: ToolSpec = {
       cwd: context.workspaceRoot,
       ...(timeoutMs ? { timeoutMs } : {})
     });
-    const rendered = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+    const verification = await detectShellVerification(command, context.workspaceRoot);
+    const renderedLines = [result.stdout.trim(), result.stderr.trim()].filter(Boolean);
+    if (verification && !verification.trusted && verification.reason) {
+      renderedLines.unshift(`Verification note: ${verification.reason}`);
+    }
+    const rendered = renderedLines.join("\n");
     const summary = result.timedOut
       ? `Command timed out after ${timeoutMs ?? 30_000} ms`
       : result.signal
         ? `Command terminated by signal ${result.signal}`
         : `Command finished with exit code ${result.exitCode ?? "null"}`;
 
-    return {
+    return withVerification({
       summary,
       content: rendered || "(no output)",
       isError: result.timedOut || (result.exitCode ?? 1) !== 0
-    };
+    }, verification, !result.timedOut && (result.exitCode ?? 1) === 0);
   }
 };
 
@@ -143,4 +150,128 @@ function optionalTimeoutMs(value: unknown): number | undefined {
   }
 
   return Math.min(value, MAX_SHELL_TIMEOUT_MS);
+}
+
+async function detectShellVerification(command: string, workspaceRoot: string): Promise<Omit<ToolVerification, "passed"> | null> {
+  const kind = classifyVerificationCommand(command);
+  if (!kind) {
+    return null;
+  }
+
+  const requestedCwd = extractRequestedWorkingDir(command, workspaceRoot);
+  const scopePaths = [requestedCwd];
+  const packageCommand = extractPackageManagerCommand(command);
+
+  if (packageCommand) {
+    const packageRoot = await findNearestPackageRoot(requestedCwd);
+    if (packageRoot) {
+      if (packageRoot !== requestedCwd && requestedCwd !== workspaceRoot) {
+        return {
+          kind,
+          trusted: false,
+          summary: `${kind} command`,
+          scopePaths: [packageRoot],
+          reason: `${packageCommand} resolved a package from ${packageRoot}, not the requested directory ${requestedCwd}. This may verify the wrong project.`
+        };
+      }
+      return {
+        kind,
+        trusted: true,
+        summary: `${kind} command`,
+        scopePaths: [packageRoot]
+      };
+    }
+  }
+
+  return {
+    kind,
+    trusted: true,
+    summary: `${kind} command`,
+    scopePaths
+  };
+}
+
+function classifyVerificationCommand(command: string): ToolVerification["kind"] | null {
+  const normalized = command.trim().toLowerCase();
+
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b/.test(normalized) || /\b(go test|cargo test|pytest|vitest|jest)\b/.test(normalized)) {
+    return "tests";
+  }
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?build\b/.test(normalized) || /\b(build|compile)\b/.test(normalized)) {
+    return "build";
+  }
+  if (/\b(npm|pnpm|yarn|bun)\s+(run\s+)?(check|lint|typecheck)\b/.test(normalized) || /\b(tsc|check|analyze|lint)\b/.test(normalized)) {
+    return "check";
+  }
+
+  return null;
+}
+
+function extractRequestedWorkingDir(command: string, workspaceRoot: string): string {
+  const match = command.match(/^\s*cd\s+((?:'[^']*'|"[^"]*"|[^;&|])+)\s*&&/);
+  if (!match?.[1]) {
+    return workspaceRoot;
+  }
+
+  const raw = unquote(match[1].trim());
+  if (path.isAbsolute(raw)) {
+    return path.resolve(raw);
+  }
+  return path.resolve(workspaceRoot, raw);
+}
+
+function extractPackageManagerCommand(command: string): string | null {
+  const normalized = command.trim().toLowerCase();
+  const match = normalized.match(/\b(npm|pnpm|yarn|bun)\b/);
+  return match?.[1] ?? null;
+}
+
+async function findNearestPackageRoot(startDir: string): Promise<string | null> {
+  let current = path.resolve(startDir);
+
+  while (true) {
+    if (await exists(path.join(current, "package.json"))) {
+      return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+async function exists(targetPath: string): Promise<boolean> {
+  try {
+    await access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function unquote(value: string): string {
+  return value.replace(/^['"]|['"]$/g, "");
+}
+
+function withVerification(
+  result: ToolResult,
+  verification: Omit<ToolVerification, "passed"> | null,
+  passed: boolean
+): ToolResult {
+  if (!verification) {
+    return result;
+  }
+
+  return {
+    ...result,
+    meta: {
+      ...(result.meta ?? {}),
+      verification: {
+        ...verification,
+        passed
+      }
+    }
+  };
 }

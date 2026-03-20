@@ -4,6 +4,7 @@ import gradient from "gradient-string";
 import ora, { Ora } from "ora";
 import { APP_NAME, APP_TAGLINE, APP_VERSION } from "./app-meta.js";
 import { formatRuntimeHostSummary, formatRuntimeTerminalSummary } from "./runtime-profile.js";
+import type { TurnPlan } from "./deliberation.js";
 import type { EffectiveConfig, RuntimeHostProfile, SessionState, ToolCall } from "./types.js";
 
 const BORDER = {
@@ -17,6 +18,7 @@ const BORDER = {
 
 export class TerminalUI {
   private assistantLineOpen = false;
+  private lastPlanSignature = "";
 
   constructor(protected readonly runtimeProfile: RuntimeHostProfile) {}
 
@@ -149,6 +151,25 @@ export class TerminalUI {
   updateTurnState(reasoning: string | null, phase: string | null): void {
     void reasoning;
     void phase;
+  }
+
+  updatePlan(plan: TurnPlan | null): void {
+    const signature = plan ? JSON.stringify(plan) : "";
+    if (signature === this.lastPlanSignature) {
+      return;
+    }
+    this.lastPlanSignature = signature;
+    if (!plan || plan.steps.length === 0) {
+      return;
+    }
+
+    this.endAssistantTurn();
+    const lines = [
+      chalk.magenta.italic(plan.title || "plan"),
+      ...(plan.explanation ? [chalk.dim(plan.explanation)] : []),
+      ...plan.steps.map((step) => `${renderPlanMarker(step.status)} ${step.label}`)
+    ];
+    console.log(lines.join("\n"));
   }
 
   endAssistantTurn(): void {
@@ -290,6 +311,17 @@ export class TerminalUI {
   private formatTimestamp(value: string): string {
     const date = new Date(value);
     return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
+  }
+}
+
+function renderPlanMarker(status: TurnPlan["steps"][number]["status"]): string {
+  switch (status) {
+    case "completed":
+      return "[x]";
+    case "in_progress":
+      return "[>]";
+    default:
+      return "[ ]";
   }
 }
 

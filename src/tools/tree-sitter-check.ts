@@ -169,6 +169,42 @@ export async function checkSyntaxWithTreeSitter(
     return diagnostics;
 }
 
+export async function checkFileSyntaxWithTreeSitter(
+    filePath: string,
+    workspaceRoot: string,
+    wasmUrl: string
+): Promise<SyntaxDiagnostic[] | null> {
+    await ensureParser();
+    if (!Parser) return null;
+
+    let grammarPath: string;
+    try {
+        grammarPath = await ensureGrammarWasm(wasmUrl);
+    } catch {
+        return null;
+    }
+
+    const parser = new Parser();
+    try {
+        const language = await Parser.Language.load(grammarPath);
+        parser.setLanguage(language);
+    } catch {
+        return null;
+    }
+
+    try {
+        const source = await readFile(filePath, "utf8");
+        const tree = parser.parse(source);
+        const sourceLines = source.split("\n");
+        const relPath = path.relative(workspaceRoot, filePath);
+        const diagnostics: SyntaxDiagnostic[] = [];
+        collectErrors(tree.rootNode, relPath, sourceLines, diagnostics);
+        return diagnostics;
+    } catch {
+        return [];
+    }
+}
+
 export async function isTreeSitterAvailable(): Promise<boolean> {
     await ensureParser();
     return Parser !== null;

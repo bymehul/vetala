@@ -124,6 +124,11 @@ func startIPCReader(r io.Reader, w io.Writer, p *tea.Program) {
 			if json.Unmarshal(raw.Data, &d) == nil {
 				p.Send(MsgTurnState(d))
 			}
+		case "plan_update":
+			var d PlanUpdateData
+			if json.Unmarshal(raw.Data, &d) == nil {
+				p.Send(MsgPlanUpdate(d))
+			}
 		case "prompt":
 			var pd PromptData
 			if json.Unmarshal(raw.Data, &pd) == nil {

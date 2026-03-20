@@ -37,6 +37,7 @@ var (
 	kindErrorStyle     = errorStyle.Copy()
 	kindActivityStyle  = mutedStyle.Copy()
 	kindThinkingStyle  = accentStyle.Copy().Italic(true)
+	planTitleStyle     = accentStyle.Copy().Bold(true)
 )
 
 func (m *model) View() tea.View {
@@ -336,7 +337,7 @@ func inputTextAreaStyles(dark bool, bg color.Color) textarea.Styles {
 	return styles
 }
 
-func (m model) renderFooter() string {
+func (m model) statusLine() string {
 	statusLine := "status: " + m.status
 	if m.running {
 		statusLine += " · running"
@@ -352,14 +353,21 @@ func (m model) renderFooter() string {
 	if m.turnPhase != "" {
 		statusLine += " · phase: " + m.turnPhase
 	}
+	return statusLine
+}
 
-	footerLeft := "/help · /undo · PgUp/PgDn scroll · Ctrl+T tool details · Ctrl+C pause · Ctrl+D exit"
+func (m model) renderFooter() string {
+	footerLeft := fmt.Sprintf(
+		"/help · /undo · PgUp/PgDn scroll · %s tool details · %s copy turn · Ctrl+C pause · Ctrl+D exit",
+		formatKeyForHint(firstKey(m.toggleToolKeys, "ctrl+t")),
+		formatKeyForHint(firstKey(m.copyTurnKeys, "ctrl+k")),
+	)
 	lines := []string{footerLeft}
 	innerWidth := maxInt(1, m.transcriptBoxWidth()-2*uiContainerPadding(m.width))
 	if len(m.skillLabels) > 0 {
 		lines = append(lines, wrapText("skills: "+strings.Join(m.skillLabels, ", "), innerWidth))
 	}
-	lines = append(lines, statusLine)
+	lines = append(lines, m.statusLine())
 
 	rendered := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -638,8 +646,13 @@ func (m *model) renderCardsToPrint(entries []EntryData) string {
 }
 
 func (m *model) renderLiveStatus() string {
-	if m.running || m.liveBuffer != "" {
+	if m.running || m.liveBuffer != "" || len(m.currentPlan.Steps) > 0 {
 		var liveContent []string
+		innerWidth := m.transcriptContentWidth()
+
+		if plan := m.renderCurrentPlan(innerWidth); plan != "" {
+			liveContent = append(liveContent, plan)
+		}
 
 		if m.activity != nil {
 			actStr := mutedStyle.Render("doing") + "\n" + m.spinner.View() + " " + mutedStyle.Render(*m.activity)
@@ -648,8 +661,6 @@ func (m *model) renderLiveStatus() string {
 			actStr := mutedStyle.Render("doing") + "\n" + m.spinner.View() + " " + mutedStyle.Render("Thinking...")
 			liveContent = append(liveContent, actStr)
 		}
-
-		innerWidth := m.transcriptContentWidth()
 
 		if m.liveBuffer != "" {
 			bufStr := accentStyle.Render("assistant") + "\n" + wrapText(truncateLines(m.liveBuffer, uiToolResultMaxLinesCompact(m.height)), innerWidth)
@@ -662,6 +673,29 @@ func (m *model) renderLiveStatus() string {
 	}
 
 	return ""
+}
+
+func (m *model) renderCurrentPlan(width int) string {
+	if len(m.currentPlan.Steps) == 0 {
+		return ""
+	}
+
+	title := m.currentPlan.Title
+	if strings.TrimSpace(title) == "" {
+		title = "plan"
+	}
+	lines := []string{planTitleStyle.Render(title)}
+	if m.currentPlan.Explanation != "" {
+		lines = append(lines, mutedStyle.Render(wrapText(m.currentPlan.Explanation, width)))
+	}
+
+	for _, step := range m.currentPlan.Steps {
+		first, rest := planMarker(step.Status)
+		label := wrapText(step.Label, maxInt(1, width-lipgloss.Width(first)))
+		lines = append(lines, prefixLines(label, first, rest))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 func (m *model) renderLiveSection(boxWidth int) string {
@@ -1030,6 +1064,17 @@ func prefixLines(text, first, rest string) string {
 		lines[i] = rest + lines[i]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func planMarker(status string) (string, string) {
+	switch status {
+	case "completed":
+		return accentStyle.Render("[x] "), accentStyle.Render("    ")
+	case "in_progress":
+		return accentStyle.Render("[>] "), accentStyle.Render("    ")
+	default:
+		return mutedStyle.Render("[ ] "), mutedStyle.Render("    ")
+	}
 }
 
 // Slash command suggestions

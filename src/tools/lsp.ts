@@ -2,9 +2,9 @@ import { readFile, stat, readdir } from "node:fs/promises";
 import { runShellCommand } from "../process-utils.js";
 import { searchRepo } from "./repo-search.js";
 import { detectLanguageByProject, detectLanguageByExtension, LANGUAGES } from "./languages.js";
-import { checkSyntaxWithTreeSitter, formatDiagnostics } from "./tree-sitter-check.js";
+import { checkFileSyntaxWithTreeSitter, checkSyntaxWithTreeSitter, formatDiagnostics } from "./tree-sitter-check.js";
 import type { LanguageEntry } from "./languages.js";
-import type { ToolSpec } from "../types.js";
+import type { ToolResult, ToolSpec, ToolVerification } from "../types.js";
 import path from "node:path";
 
 export function createLspTools(): ToolSpec[] {
@@ -41,15 +41,38 @@ const getDiagnosticsTool: ToolSpec = {
     "Uses the native toolchain when available; falls back to tree-sitter syntax checking otherwise.",
   jsonSchema: {
     type: "object",
-    properties: {},
+    properties: {
+      path: {
+        type: "string",
+        description: "Optional file or directory to diagnose. Defaults to the workspace root."
+      }
+    },
     additionalProperties: false
   },
   readOnly: true,
-  async execute(_rawArgs, context) {
+  async execute(rawArgs, context) {
+    const args = expectObject(rawArgs);
+    const pathArg = typeof args.path === "string" && args.path.trim().length > 0
+      ? await context.paths.ensureReadable(args.path)
+      : null;
+
+    if (pathArg) {
+      const targetStats = await stat(pathArg);
+      if (targetStats.isFile()) {
+        return runFileDiagnostics(pathArg, context.workspaceRoot);
+      }
+      return runProjectDiagnostics(pathArg);
+    }
+
+    return runProjectDiagnostics(context.workspaceRoot);
+  }
+};
+
+async function runProjectDiagnostics(root: string): Promise<ToolResult> {
     // 1. Scan workspace for project marker files
     const existingFiles = new Set<string>();
     try {
-      const entries = await readdir(context.workspaceRoot);
+      const entries = await readdir(root);
       for (const e of entries) existingFiles.add(e);
     } catch {
       return {
@@ -76,13 +99,13 @@ const getDiagnosticsTool: ToolSpec = {
     if (lang.nativeCheck) {
       const binAvailable = await commandExists(lang.nativeCheck.binary);
       if (binAvailable) {
-        return runNativeCheck(lang, context.workspaceRoot);
+        return runNativeCheck(lang, root);
       }
     }
 
     // 3. Tier 2 — tree-sitter fallback (zero external deps)
     if (lang.treeSitterWasmUrl) {
-      return runTreeSitterCheck(lang, context.workspaceRoot);
+      return runTreeSitterCheck(lang, root);
     }
 
     // 4. No checker available at all for this language
@@ -93,8 +116,7 @@ const getDiagnosticsTool: ToolSpec = {
         "and no tree-sitter grammar is configured for fallback checking.",
       isError: true
     };
-  }
-};
+}
 
 async function runNativeCheck(lang: LanguageEntry, cwd: string) {
   const cmd = lang.nativeCheck!.command;
@@ -102,18 +124,30 @@ async function runNativeCheck(lang: LanguageEntry, cwd: string) {
   const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
 
   if (result.exitCode === 0) {
-    return {
+    return withVerification({
       summary: `${lang.label}: no errors found (${lang.nativeCheck!.binary})`,
       content: "No errors or warnings found.",
       isError: false
-    };
+    }, {
+      kind: "diagnostics",
+      trusted: true,
+      passed: true,
+      summary: `${lang.label} diagnostics`,
+      scopePaths: [cwd]
+    });
   }
 
-  return {
+  return withVerification({
     summary: `${lang.label}: errors found via ${lang.nativeCheck!.binary}`,
     content: output || "(no output but command failed)",
     isError: true
-  };
+  }, {
+    kind: "diagnostics",
+    trusted: true,
+    passed: false,
+    summary: `${lang.label} diagnostics`,
+    scopePaths: [cwd]
+  });
 }
 
 async function runTreeSitterCheck(lang: LanguageEntry, cwd: string) {
@@ -134,18 +168,148 @@ async function runTreeSitterCheck(lang: LanguageEntry, cwd: string) {
   }
 
   if (diagnostics.length === 0) {
-    return {
+    return withVerification({
       summary: `${lang.label}: no syntax errors (tree-sitter)`,
       content: "No syntax errors found via tree-sitter analysis.",
       isError: false
-    };
+    }, {
+      kind: "diagnostics",
+      trusted: true,
+      passed: true,
+      summary: `${lang.label} syntax check`,
+      scopePaths: [cwd]
+    });
   }
 
-  return {
+  return withVerification({
     summary: `${lang.label}: ${diagnostics.length} syntax error(s) (tree-sitter)`,
     content: formatDiagnostics(diagnostics),
     isError: true
+  }, {
+    kind: "diagnostics",
+    trusted: true,
+    passed: false,
+    summary: `${lang.label} syntax check`,
+    scopePaths: [cwd]
+  });
+}
+
+async function runFileDiagnostics(target: string, workspaceRoot: string): Promise<ToolResult> {
+  const ext = path.extname(target);
+  const lang = detectLanguageByExtension(ext);
+
+  if (!lang) {
+    return {
+      summary: `No diagnostics available for ${target}`,
+      content: `Could not determine a supported language for ${target}.`,
+      isError: true
+    };
+  }
+
+  if (lang.nativeCheck) {
+    const binAvailable = await commandExists(lang.nativeCheck.binary);
+    const fileCommand = buildFileDiagnosticsCommand(lang, target);
+    if (binAvailable && fileCommand) {
+      const cwd = path.dirname(target);
+      const result = await runShellCommand(fileCommand, { cwd, timeoutMs: 60_000, noPty: true });
+      const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
+      return withVerification({
+        summary: result.exitCode === 0
+          ? `${lang.label}: no errors found in ${target}`
+          : `${lang.label}: errors found in ${target}`,
+        content: output || (result.exitCode === 0 ? "No errors or warnings found." : "(no output but command failed)"),
+        isError: (result.exitCode ?? 1) !== 0
+      }, {
+        kind: "diagnostics",
+        trusted: true,
+        passed: (result.exitCode ?? 1) === 0,
+        summary: `${lang.label} diagnostics for ${path.basename(target)}`,
+        scopePaths: [target]
+      });
+    }
+  }
+
+  if (lang.treeSitterWasmUrl) {
+    const diagnostics = await checkFileSyntaxWithTreeSitter(target, workspaceRoot, lang.treeSitterWasmUrl);
+    if (diagnostics === null) {
+      return {
+        summary: `Tree-sitter unavailable for ${lang.label}`,
+        content:
+          "Could not initialize tree-sitter syntax checking for this file. " +
+          `Install the native ${lang.nativeCheck?.binary ?? lang.id} toolchain for diagnostics.`,
+        isError: true
+      };
+    }
+
+    if (diagnostics.length === 0) {
+      return withVerification({
+        summary: `${lang.label}: no syntax errors in ${target}`,
+        content: "No syntax errors found via tree-sitter analysis.",
+        isError: false
+      }, {
+        kind: "diagnostics",
+        trusted: true,
+        passed: true,
+        summary: `${lang.label} syntax check for ${path.basename(target)}`,
+        scopePaths: [target]
+      });
+    }
+
+    return withVerification({
+      summary: `${lang.label}: ${diagnostics.length} syntax error(s) in ${target}`,
+      content: formatDiagnostics(diagnostics),
+      isError: true
+    }, {
+      kind: "diagnostics",
+      trusted: true,
+      passed: false,
+      summary: `${lang.label} syntax check for ${path.basename(target)}`,
+      scopePaths: [target]
+    });
+  }
+
+  return {
+    summary: `No diagnostics available for ${target}`,
+    content:
+      `Detected ${lang.label} from the file extension, but no file-scoped checker is configured for ${target}.`,
+    isError: true
   };
+}
+
+function buildFileDiagnosticsCommand(lang: LanguageEntry, target: string): string | null {
+  const quoted = quoteShell(target);
+  const ext = path.extname(target).toLowerCase();
+  const jsxFlag = ext === ".tsx" || ext === ".jsx" ? "--jsx react-jsx " : "";
+  switch (lang.id) {
+    case "typescript":
+      return `npx tsc --noEmit --pretty false ${jsxFlag}${quoted}`;
+    case "javascript":
+      return `npx tsc --noEmit --allowJs --checkJs --pretty false ${jsxFlag}${quoted}`;
+    case "python":
+      return `python3 -m py_compile ${quoted}`;
+    case "ruby":
+      return `ruby -c ${quoted}`;
+    case "php":
+      return `php -l ${quoted}`;
+    case "bash":
+      return `bash --norc -n ${quoted}`;
+    default:
+      return null;
+  }
+}
+
+function withVerification(result: ToolResult, verification: ToolVerification): ToolResult {
+  return {
+    ...result,
+    meta: {
+      ...(result.meta ?? {}),
+      verification
+    }
+  };
+}
+
+function quoteShell(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
 // ---------------------------------------------------------------------------

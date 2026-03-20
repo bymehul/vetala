@@ -279,12 +279,31 @@ export interface ToolExecutionSummary {
   referencedFiles?: string[];
 }
 
+export type TurnTaskKind = "chat" | "explain" | "edit" | "review" | "audit" | "research";
+
+export interface ToolVerification {
+  kind: "diagnostics" | "build" | "tests" | "check" | "shell";
+  trusted: boolean;
+  passed: boolean;
+  summary: string;
+  scopePaths?: string[];
+  reason?: string;
+}
+
+export interface ToolResultMeta {
+  inspectedPaths?: string[];
+  changedFiles?: string[];
+  noOp?: boolean;
+  verification?: ToolVerification;
+}
+
 export interface ToolResult {
   summary: string;
   content: string;
   isError: boolean;
   referencedFiles?: string[];
   readFiles?: string[];
+  meta?: ToolResultMeta;
 }
 
 export interface SearchResult {
@@ -302,6 +321,14 @@ export interface SearchProvider {
 export interface ToolContext {
   cwd: string;
   workspaceRoot: string;
+  turn?: {
+    taskKind: TurnTaskKind;
+    explicitPaths: string[];
+    explicitFiles: string[];
+    explicitDirs: string[];
+    preferredRoot: string | null;
+    changedFiles: string[];
+  };
   lifecycle: {
     signal: AbortSignal;
     throwIfAborted(): void;

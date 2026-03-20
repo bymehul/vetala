@@ -49,6 +49,18 @@ type TurnStateData struct {
 	Phase     string `json:"phase"`
 }
 
+type PlanStepData struct {
+	Id     string `json:"id"`
+	Label  string `json:"label"`
+	Status string `json:"status"`
+}
+
+type PlanUpdateData struct {
+	Title       string         `json:"title"`
+	Explanation string         `json:"explanation"`
+	Steps       []PlanStepData `json:"steps"`
+}
+
 type PromptData struct {
 	PromptType string `json:"promptType"`
 	// varying fields based on PromptType
@@ -86,6 +98,7 @@ type MsgSpinner struct{ Label *string }
 type MsgStatus string
 type MsgSkills []string
 type MsgTurnState TurnStateData
+type MsgPlanUpdate PlanUpdateData
 type MsgPromptTrust string    // workspace
 type MsgPromptApproval string // label
 type MsgPromptExit struct{}

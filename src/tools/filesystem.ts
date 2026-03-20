@@ -48,7 +48,11 @@ const listDirTool: ToolSpec = {
   readOnly: true,
   async execute(rawArgs, context) {
     const args = expectObject(rawArgs);
-    const target = await context.paths.ensureReadable(stringOrDefault(args.path, "."));
+    const target = await context.paths.ensureReadable(stringOrDefault(args.path, context.turn?.preferredRoot ?? "."));
+    const deferred = deferBroadWorkspaceExploration("list_dir", target, context);
+    if (deferred) {
+      return deferred;
+    }
     const entries = await readdir(target, { withFileTypes: true });
     const rows = await Promise.all(
       entries
@@ -66,7 +70,10 @@ const listDirTool: ToolSpec = {
       summary: `Listed ${rows.length} entries in ${target}`,
       content: rows.join("\n") || "(empty directory)",
       isError: false,
-      referencedFiles: [target]
+      referencedFiles: [target],
+      meta: {
+        inspectedPaths: [target]
+      }
     };
   }
 };
@@ -158,11 +165,14 @@ const readFileTool: ToolSpec = {
     try {
       const stats = await stat(target);
       if (stats.isDirectory()) {
-        return {
+      return {
           summary: `Cannot read ${target}`,
           content: `${target} is a directory, not a file. Please use the list_dir tool to explore its contents.`,
           isError: true,
-          referencedFiles: [target]
+          referencedFiles: [target],
+          meta: {
+            inspectedPaths: [target]
+          }
         };
       }
       
@@ -177,7 +187,10 @@ const readFileTool: ToolSpec = {
         summary: `Failed to read ${target}`,
         content: error instanceof Error ? error.message : String(error),
         isError: true,
-        referencedFiles: [target]
+        referencedFiles: [target],
+        meta: {
+          inspectedPaths: [target]
+        }
       };
     }
   }
@@ -215,11 +228,14 @@ const readFileChunkTool: ToolSpec = {
     try {
       const stats = await stat(target);
       if (stats.isDirectory()) {
-        return {
+      return {
           summary: `Cannot read ${target}`,
           content: `${target} is a directory, not a file. Please use the list_dir tool to explore its contents.`,
           isError: true,
-          referencedFiles: [target]
+          referencedFiles: [target],
+          meta: {
+            inspectedPaths: [target]
+          }
         };
       }
 
@@ -232,7 +248,10 @@ const readFileChunkTool: ToolSpec = {
         summary: `Failed to read ${target}`,
         content: error instanceof Error ? error.message : String(error),
         isError: true,
-        referencedFiles: [target]
+        referencedFiles: [target],
+        meta: {
+          inspectedPaths: [target]
+        }
       };
     }
   }
@@ -316,7 +335,10 @@ const readSymbolTool: ToolSpec = {
       content: rendered.join("\n\n"),
       isError: false,
       referencedFiles: files,
-      readFiles: files
+      readFiles: files,
+      meta: {
+        inspectedPaths: files
+      }
     };
   }
 };
@@ -625,7 +647,10 @@ const moveFileTool: ToolSpec = {
         summary: `Moved ${source} to ${destination}`,
         content: `Successfully moved ${source} to ${destination}`,
         isError: false,
-        referencedFiles: [source, destination]
+        referencedFiles: [source, destination],
+        meta: {
+          changedFiles: [source, destination]
+        }
       };
     } catch (error) {
       return {
@@ -672,7 +697,10 @@ const deleteFileTool: ToolSpec = {
         summary: `Deleted ${target}`,
         content: `Successfully deleted ${target}`,
         isError: false,
-        referencedFiles: [target]
+        referencedFiles: [target],
+        meta: {
+          changedFiles: [target]
+        }
       };
     } catch (error) {
       return {
@@ -700,7 +728,11 @@ async function executeSearchTool(args: Record<string, unknown>, context: ToolCon
     };
   }
 
-  const target = await context.paths.ensureReadable(stringOrDefault(args.path, "."));
+  const target = await context.paths.ensureReadable(stringOrDefault(args.path, context.turn?.preferredRoot ?? "."));
+  const deferred = deferBroadWorkspaceExploration("search_repo", target, context);
+  if (deferred) {
+    return deferred;
+  }
   const limit = clampInteger(integerOrDefault(args.limit, DEFAULT_SEARCH_LIMIT), 1, 200);
   const matches = await searchRepo({
     query,
@@ -720,7 +752,10 @@ async function executeSearchTool(args: Record<string, unknown>, context: ToolCon
       ? matches.map((match) => `${match.filePath}:${match.lineNumber}:${match.lineText}`).join("\n")
       : "(no matches)",
     isError: false,
-    referencedFiles: [target]
+    referencedFiles: [target],
+    meta: {
+      inspectedPaths: [target]
+    }
   };
 }
 
@@ -753,7 +788,10 @@ function renderReadSlice(target: string, lines: string[], startLine: number, end
     content,
     isError: false,
     referencedFiles: [target],
-    readFiles: [target]
+    readFiles: [target],
+    meta: {
+      inspectedPaths: [target]
+    }
   };
 }
 
@@ -897,6 +935,10 @@ function applyChangesToContent(target: string, original: string, changes: PatchC
       : updated.replace(change.search, change.replace);
   }
 
+  if (updated === original) {
+    throw new Error(`No-op edit for ${target}. The requested replacement does not change the file.`);
+  }
+
   return { updated, replacements };
 }
 
@@ -929,7 +971,10 @@ async function writePatchedFile(
       `changes: +${stats.added} -${stats.removed}`
     ].join("\n"),
     isError: false,
-    referencedFiles: [target]
+    referencedFiles: [target],
+    meta: {
+      changedFiles: [target]
+    }
   };
 }
 
@@ -947,7 +992,45 @@ function successWithDiff(target: string, beforeContent: string | null, afterCont
       `changes: +${stats.added} -${stats.removed}`
     ].join("\n"),
     isError: false,
-    referencedFiles: [target]
+    referencedFiles: [target],
+    meta: {
+      changedFiles: [target]
+    }
+  };
+}
+
+function deferBroadWorkspaceExploration(toolName: "list_dir" | "search_repo", target: string, context: ToolContext): ToolResult | null {
+  const turn = context.turn;
+  if (!turn) {
+    return null;
+  }
+
+  if (target !== context.workspaceRoot) {
+    return null;
+  }
+
+  if (turn.explicitFiles.length === 0) {
+    return null;
+  }
+
+  if (turn.taskKind !== "edit" && turn.taskKind !== "review" && turn.taskKind !== "explain") {
+    return null;
+  }
+
+  if (turn.explicitFiles.some((file) => context.reads.hasRead(file))) {
+    return null;
+  }
+
+  const namedTargets = turn.explicitFiles.join(", ");
+  return {
+    summary: `Read the named target before broad ${toolName === "list_dir" ? "listing" : "search"}`,
+    content: [
+      `The user already named concrete target files: ${namedTargets}.`,
+      `Read those files first instead of exploring the entire workspace root.`,
+      `If broader context is still needed after that, rerun ${toolName} with a narrower path rooted near the named targets.`
+    ].join("\n"),
+    isError: true,
+    referencedFiles: turn.explicitFiles
   };
 }
 
