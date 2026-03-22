@@ -497,10 +497,9 @@ test("analyzeTurnDeliberation raises reasoning for non-trivial review tasks", ()
   assert.equal(deliberation.reasoningEffort, "high");
   assert.equal(deliberation.reasoningLabel, "high");
   assert.equal(deliberation.shouldShowThinking, true);
-  assert.equal(deliberation.plan?.taskKind, "review");
-  assert.match(deliberation.thinkingSummary ?? "", /inspect test-react\/App\.tsx/i);
-  assert.equal(deliberation.plan?.steps[0]?.id, "inspect");
-  assert.match(deliberation.plan?.steps[2]?.label ?? "", /regressions/i);
+  // Plans are now generated dynamically by the model loop, so they default to null
+  assert.equal(deliberation.plan, null);
+  assert.equal(deliberation.thinkingSummary, null);
 });
 
 test("analyzeTurnDeliberation prefers clarification guidance for ambiguous edit requests", () => {
@@ -508,51 +507,44 @@ test("analyzeTurnDeliberation prefers clarification guidance for ambiguous edit 
 
   assert.equal(deliberation.reasoningEffort, "medium");
   assert.match(deliberation.guidance ?? "", /ask_user/i);
-  assert.match(deliberation.thinkingSummary ?? "", /clarifying question/i);
-  assert.match(deliberation.plan?.steps[1]?.label ?? "", /clarify scope/i);
 });
 
-test("advanceTurnPlan progresses non-trivial work from inspection to completion", () => {
+test("advanceTurnPlan safely ignores null plans until they are dynamically created", () => {
   const deliberation = analyzeTurnDeliberation("explain this codebase", { configuredEffort: null });
   const initial = advanceTurnPlan(deliberation.plan, "inspect");
-  const decided = advanceTurnPlan(initial, "decide");
-  const executing = advanceTurnPlan(decided, "execute");
-  const completed = advanceTurnPlan(executing, "complete");
-
-  assert.equal(initial?.steps[0]?.status, "in_progress");
-  assert.equal(decided?.steps[0]?.status, "completed");
-  assert.equal(decided?.steps[1]?.status, "in_progress");
-  assert.equal(executing?.steps[2]?.status, "in_progress");
-  assert.deepEqual(
-    completed?.steps.map((step) => step.status),
-    ["completed", "completed", "completed", "completed"]
-  );
+  assert.equal(initial, null);
 });
 
-test("updateTurnPlan keeps execution pending until there is real change evidence", () => {
-  const deliberation = analyzeTurnDeliberation(
-    "refactor test-react/App.tsx using better React patterns and improve that",
-    { configuredEffort: null }
-  );
+test("updateTurnPlan updates dynamic steps correctly once a plan exists", () => {
+  const dynamicPlan = {
+    taskKind: "edit" as const,
+    title: "Dynamic Plan",
+    explanation: "Fixing bugs",
+    steps: [
+      { id: "step1", label: "Inspect code", status: "pending" as const },
+      { id: "step2", label: "Write fix", status: "pending" as const },
+      { id: "step3", label: "Test", status: "pending" as const }
+    ]
+  };
 
-  const afterInspect = updateTurnPlan(deliberation.plan, {
-    completed: ["inspect"],
-    inProgress: "decide"
+  const afterInspect = updateTurnPlan(dynamicPlan, {
+    completed: ["step1"],
+    inProgress: "step2"
   });
 
   assert.deepEqual(
     afterInspect?.steps.map((step) => step.status),
-    ["completed", "in_progress", "pending", "pending"]
+    ["completed", "in_progress", "pending"]
   );
 
   const afterEdit = updateTurnPlan(afterInspect, {
-    completed: ["inspect", "decide"],
-    inProgress: "execute"
+    completed: ["step1", "step2"],
+    inProgress: "step3"
   });
 
   assert.deepEqual(
     afterEdit?.steps.map((step) => step.status),
-    ["completed", "completed", "in_progress", "pending"]
+    ["completed", "completed", "in_progress"]
   );
 });
 
