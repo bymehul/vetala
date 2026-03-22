@@ -58,10 +58,10 @@ export function analyzeTurnDeliberation(userInput: string, options: Deliberation
     taskKind,
     reasoningEffort,
     reasoningLabel,
-    thinkingSummary: shouldShowThinking ? buildThinkingSummary(taskKind, filePaths, ambiguousEdit) : null,
+    thinkingSummary: null,
     guidance,
-    shouldShowThinking,
-    plan: shouldShowThinking ? buildTurnPlan(taskKind, filePaths, ambiguousEdit) : null
+    shouldShowThinking: taskKind !== "chat" && score >= 2,
+    plan: null
   };
 }
 
@@ -71,6 +71,9 @@ export function advanceTurnPlan(plan: TurnPlan | null, stage: TurnPlanStage): Tu
   }
 
   const next = cloneTurnPlan(plan);
+  if (!next) {
+    return null;
+  }
   switch (stage) {
     case "inspect":
       setStepStatus(next, "inspect", "in_progress");
@@ -106,6 +109,9 @@ export function updateTurnPlan(
   }
 
   const next = cloneTurnPlan(plan);
+  if (!next) {
+    return null;
+  }
   const completed = new Set(options.completed ?? []);
 
   for (const step of next.steps) {
@@ -416,7 +422,10 @@ function completeStep(plan: TurnPlan, stepId: TurnPlanStep["id"]): void {
   }
 }
 
-function cloneTurnPlan(plan: TurnPlan): TurnPlan {
+export function cloneTurnPlan(plan: TurnPlan | null): TurnPlan | null {
+  if (!plan) {
+    return null;
+  }
   return {
     taskKind: plan.taskKind,
     title: plan.title,

@@ -27,6 +27,16 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.6.1
+Added:
+- Enhanced the core cognitive execution loop with explicit `Think -> Act -> Observe -> Reflect` guardrails.
+- Added a completion confidence and verification system requiring empirical proof before declaring tasks finished.
+- Migrated from hardcoded default plans to a dynamic, model-driven task planning system with granular state tracking.
+- Introduced a strict constraint to prevent "fake shell execution" and force the use of real filesystem tools over markdown code blocks.
+
+Patched:
+- Added smart API error detection to immediately stop and alert the user on non-retryable OpenRouter guardrail, data policy, or auth errors instead of blind retrying.
+
 ### v0.6.0
 Added:
 - Deliberation-aware TUI turns with thinking summaries, checkbox plans, and live reasoning/phase state.

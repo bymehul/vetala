@@ -3,8 +3,89 @@ import { searchRepo } from "./repo-search.js";
 import type { ToolSpec } from "../types.js";
 
 export function createAdvancedTools(): ToolSpec[] {
-  return [semanticSearchTool, astReplaceTool];
+  return [semanticSearchTool, astReplaceTool, updateStateTool, taskCompletedTool];
 }
+
+const updateStateTool: ToolSpec = {
+  name: "update_task_state",
+  description: "Update the internal tracking state of your current task. Use this to remember what you have tried, what succeeded, and what failed. You can also define or update your own dynamic sub-tasks here to override the default plan.",
+  jsonSchema: {
+    type: "object",
+    properties: {
+      current_goal: { type: "string" },
+      sub_tasks: { 
+        type: "array", 
+        items: { 
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            label: { type: "string" },
+            status: { type: "string", enum: ["pending", "in_progress", "completed"] }
+          },
+          required: ["id", "label", "status"]
+        },
+        description: "List of specific sub-tasks you have defined for this goal. Updates the UI plan."
+      },
+      tried: { type: "array", items: { type: "string" } },
+      succeeded: { type: "array", items: { type: "string" } },
+      failed: { type: "array", items: { type: "string" } },
+      next_steps: { type: "array", items: { type: "string" } }
+    },
+    required: ["current_goal", "tried", "succeeded", "failed", "next_steps"],
+    additionalProperties: false
+  },
+  readOnly: true,
+  async execute(rawArgs, context) {
+    const args = expectObject(rawArgs);
+    // Note: The actual UI plan update is handled by the agent loop observing this tool's arguments
+    return {
+      summary: "State tracking updated",
+      content: `State successfully saved. Current Goal: ${args.current_goal}. Sub-tasks: ${Array.isArray(args.sub_tasks) ? args.sub_tasks.length : 0}.`,
+      isError: false
+    };
+  }
+};
+
+const taskCompletedTool: ToolSpec = {
+  name: "task_completed",
+  description: "Mark the current overall task as completed. You MUST call this tool when you are 100% confident that the user's original request is fully implemented and empirically verified.",
+  jsonSchema: {
+    type: "object",
+    properties: {
+      confidence_score: { 
+        type: "number", 
+        description: "Your confidence level from 0 to 100 that the task is complete and verified." 
+      },
+      summary: { 
+        type: "string", 
+        description: "A summary of what was accomplished and how it was verified." 
+      },
+      unresolved_issues: {
+        type: "array",
+        items: { type: "string" },
+        description: "Any remaining issues or warnings that the user should know about."
+      }
+    },
+    required: ["confidence_score", "summary", "unresolved_issues"],
+    additionalProperties: false
+  },
+  readOnly: true,
+  async execute(rawArgs, context) {
+    const args = expectObject(rawArgs);
+    if (typeof args.confidence_score === "number" && args.confidence_score < 95) {
+      return {
+        summary: "Task completion rejected",
+        content: `Your confidence score is ${args.confidence_score}%. You must reach at least 95% confidence by performing deeper verification before declaring the task completed.`,
+        isError: true
+      };
+    }
+    return {
+      summary: "Task marked as completed",
+      content: `Task completed with ${args.confidence_score}% confidence.\nSummary: ${args.summary}\nUnresolved: ${Array.isArray(args.unresolved_issues) ? args.unresolved_issues.join(", ") : "None"}`,
+      isError: false
+    };
+  }
+};
 
 const semanticSearchTool: ToolSpec = {
   name: "semantic_search",

@@ -1,6 +1,6 @@
 import { ApprovalManager } from "./approvals.js";
 import { compactConversation } from "./context-memory.js";
-import { advanceTurnPlan, analyzeTurnDeliberation, phaseForTool, updateTurnPlan } from "./deliberation.js";
+import { advanceTurnPlan, analyzeTurnDeliberation, cloneTurnPlan, phaseForTool, updateTurnPlan } from "./deliberation.js";
 import { loadMemoriesPrompt, loadRulesPrompt } from "./context-files.js";
 import { appendHistoryEntry } from "./history-store.js";
 import { PathPolicy } from "./path-policy.js";
@@ -225,12 +225,19 @@ export class Agent {
 
           consecutiveApiErrors += 1;
           const errorMessage = error instanceof Error ? error.message : String(error);
+          const isNonRetryable = 
+            errorMessage.includes("guardrail") || 
+            errorMessage.includes("policy") || 
+            errorMessage.includes("unauthorized") || 
+            errorMessage.includes("401") || 
+            errorMessage.includes("403");
 
-          if (consecutiveApiErrors >= 3) {
-            await this.appendAndRenderAssistantMessage(
-              `I've encountered multiple consecutive API errors and must stop. Last error: ${errorMessage}`,
-              true
-            );
+          if (consecutiveApiErrors >= 3 || isNonRetryable) {
+            const finalMessage = isNonRetryable 
+              ? `I encountered a non-retryable API error: ${errorMessage}. Please check your provider settings or guardrail restrictions.`
+              : `I've encountered multiple consecutive API errors and must stop. Last error: ${errorMessage}`;
+            
+            await this.appendAndRenderAssistantMessage(finalMessage, true);
             return;
           }
 
@@ -239,7 +246,7 @@ export class Agent {
 
           const syntheticUserMessage = this.persistedMessage({
             role: "user",
-            content: `SYSTEM ALERT: The previous generation failed with an API error: ${errorMessage}\nIf you were generating a large file, you likely hit the maximum output token limit. Please try breaking your response down, or use the append_to_file tool to write large files in chunks.`
+            content: `SYSTEM ALERT: The previous generation failed with an API error: ${errorMessage}\nIf this error persists, consider breaking your request into smaller parts or checking your model configuration.`
           });
           await this.options.sessionStore.appendMessage(this.options.session, syntheticUserMessage);
 
@@ -299,32 +306,72 @@ export class Agent {
           content: turn.content || null,
           tool_calls: partitionedToolCalls.validToolCalls.length > 0 ? partitionedToolCalls.validToolCalls : null
         });
+        
+        // Extract thinking summary from content if not already set
+        if (turn.content && !this.turnPlanInspected) {
+          const lines = turn.content.split("\n");
+          const thinkingLines = lines.filter(l => l.trim().startsWith("- ") || l.trim().startsWith("* "));
+          if (thinkingLines.length > 0) {
+             this.options.ui.printThinking(thinkingLines.slice(0, 3).join("\n"));
+          }
+        }
+
         await this.options.sessionStore.appendMessage(this.options.session, assistantMessage);
 
         if (partitionedToolCalls.validToolCalls.length === 0) {
-          const verificationPrompt = this.pendingVerificationPrompt();
-          if (verificationPrompt) {
-            this.turnVerificationNudges += 1;
-            await this.options.sessionStore.appendMessage(
-              this.options.session,
-              this.persistedMessage({
-                role: "user",
-                content: verificationPrompt
-              })
-            );
-            continue;
+          if (this.turnTaskKind !== "chat") {
+            const verificationPrompt = this.pendingVerificationPrompt();
+            if (verificationPrompt) {
+              this.turnVerificationNudges += 1;
+              await this.options.sessionStore.appendMessage(
+                this.options.session,
+                this.persistedMessage({
+                  role: "user",
+                  content: verificationPrompt
+                })
+              );
+              continue;
+            }
+
+            // Force the use of task_completed for non-chat tasks if they just wrote text
+            const textContent = (turn.content || "").toLowerCase();
+            const looksLikeCodeBlock = textContent.includes("```");
+            
+            if (this.turnVerificationNudges < 3 && !textContent.includes("task_completed")) {
+              this.turnVerificationNudges += 1;
+              const pushback = looksLikeCodeBlock 
+                ? "SYSTEM ALERT: You provided a code block in your response instead of using a tool to write it. You MUST use 'replace_in_file' or 'write_file' to apply these changes. Do not just write code in markdown."
+                : "SYSTEM ALERT: You stopped calling tools. If you are finished with the task, you MUST call the `task_completed` tool to formalize completion. If you are not finished, please use the appropriate tools to continue.";
+                
+              this.options.ui.warn("Agent stopped prematurely. Nudging to use tools or task_completed...");
+              await this.options.sessionStore.appendMessage(
+                this.options.session,
+                this.persistedMessage({
+                  role: "user",
+                  content: pushback
+                })
+              );
+              continue;
+            }
           }
+          
           this.finalizeCurrentPlan();
           this.options.ui.endAssistantTurn();
           return;
         }
 
         let suppressedRepeats = 0;
+        let taskCompletedCalled = false;
+        
         for (const toolCall of partitionedToolCalls.validToolCalls) {
           this.throwIfStopped();
           this.options.ui.printToolCall(toolCall);
           const signature = toolCallSignature(toolCall);
           let result;
+
+          if (toolCall.function.name === "task_completed") {
+            taskCompletedCalled = true;
+          }
 
           if (seenToolCalls.has(signature)) {
             suppressedRepeats += 1;
@@ -350,7 +397,7 @@ export class Agent {
               }
               throw error;
             }
-            this.observeToolResult(toolCall.function.name, isMutating, result);
+            this.observeToolResult(toolCall, isMutating, result);
 
             if (result.isError) {
               seenToolCalls.delete(signature);
@@ -370,6 +417,13 @@ export class Agent {
               tool_call_id: toolCall.id
             })
           );
+        }
+
+        // If the agent successfully completed the task this turn, exit the loop cleanly.
+        if (taskCompletedCalled) {
+          this.finalizeCurrentPlan();
+          this.options.ui.endAssistantTurn();
+          return;
         }
 
         if (shouldInjectRepeatWarning(suppressedRepeats, repeatWarningInjected)) {
@@ -578,12 +632,40 @@ export class Agent {
       `Active provider: ${providerLabel(this.options.session.provider)}`,
       `Active model: ${this.options.session.model}`,
       `Allowed roots right now: ${this.options.pathPolicy.allowedRoots().join(", ")}`,
+      "",
+      "=== CORE EXECUTION LOOP (THINK -> ACT -> OBSERVE -> REFLECT) ===",
+      "1. You do not just run tools once and stop. You operate in a sustained, multi-step execution loop.",
+      "2. For every step, you MUST maintain a mental state of what you have tried, what succeeded, and what failed. Do not repeat the exact same failed actions.",
+      "3. Before executing any tool, explicitly evaluate whether it is the most strategic choice (e.g., use fast searches before reading entire files).",
+      "4. You MUST generate a concise, bulleted thinking summary and a structured plan (sub-tasks) at the beginning of your response to inform the user of your intent.",
+      "5. NEVER write code blocks in your markdown response as a way of delivering fixes. You MUST use 'replace_in_file' or 'write_file' tools to apply changes directly to the file system.",
+      "6. NEVER hallucinate or claim you ran a test or command (like 'npm start' or 'tsc') unless you actually executed it using the 'run_shell' tool.",
+      "",
+      "=== GOAL AWARENESS & LONG-HORIZON STABILITY ===",
+      "1. Deconstruct complex requests into explicit sub-tasks. Maintain an internal tracker of these tasks.",
+      "2. Do not treat generic 'inspect, decide, execute' as a real plan. Formulate specific, verifiable steps.",
+      "3. Continuously re-evaluate your progress toward the ultimate goal. If you are drifting, explicitly correct your course.",
+      "",
+      "=== FAILURE HANDLING & ADAPTIVE STRATEGY ===",
+      "1. Errors are not just noise; they are critical signals. If a tool call or compilation fails, deeply analyze WHY it failed.",
+      "2. You MUST NOT brute-force the same approach if it fails twice. Pivot to an entirely different strategy.",
+      "3. Persist memory of failures across your turn to prevent repeating mistakes.",
+      "",
+      "=== CONTEXT INTELLIGENCE & VERIFICATION DEPTH ===",
+      "1. Be ruthless about context. Only read files and lines that are strictly necessary.",
+      "2. You MUST empirically verify all changes. Do not claim a change works unless you have run a test, compiled the code, or executed a script that proves it.",
+      "3. Validate the environment and edge cases before declaring completion.",
+      "",
+      "=== COMPLETION CONFIDENCE ===",
+      "1. Before ending your turn, internally evaluate your Confidence Score (0-100%).",
+      "2. If your confidence is below 95%, you must gather more information, run more tests, or ask the user for clarification before stopping.",
+      "",
+      "=== BASE RULES ===",
       "When using tools, emit valid JSON object arguments only.",
       "Prefer smaller tool calls over giant payloads. Break large refactors and large apply_patch edits into multiple steps.",
       "When the user names a concrete file path, read that file directly with read_file or read_file_chunk before considering search_repo.",
       "If the user named concrete files or directories, stay scoped to them unless you have concrete evidence that broader repo context is required.",
       "When active skill guidance is already injected below, use it directly. Do not call the skill tool again unless you need a specific deeper file that is not already summarized.",
-      "For non-trivial tasks, form a concise plan before acting and execute it incrementally.",
       "If the target, scope, or acceptance criteria remain unclear after initial inspection, use ask_user before editing.",
       "For source-file edits, prefer targeted diagnostics on the named file or changed file before and after editing when available.",
       "Do not claim a build, test, or diagnostics check verified your change unless the tool output explicitly supports that claim.",
@@ -727,9 +809,33 @@ export class Agent {
     this.setTurnPlan(next);
   }
 
-  private observeToolResult(toolName: string, isMutating: boolean, result: ToolResult): void {
+  private observeToolResult(toolCall: ToolCall, isMutating: boolean, result: ToolResult): void {
+    const toolName = toolCall.function.name;
     const phase = phaseForTool(toolName);
     const meta = result.meta;
+
+    if (toolName === "update_task_state" && !result.isError) {
+      try {
+        const args = JSON.parse(toolCall.function.arguments);
+        if (Array.isArray(args.sub_tasks)) {
+          const nextPlan: TurnPlan = this.turnPlan ? cloneTurnPlan(this.turnPlan)! : {
+             taskKind: this.turnTaskKind,
+             title: "Dynamic Plan",
+             explanation: args.current_goal,
+             steps: []
+          };
+          
+          nextPlan.steps = args.sub_tasks.map((st: any) => ({
+            id: st.id || "step-" + Math.random().toString(36).slice(2, 7),
+            label: st.label,
+            status: st.status
+          }));
+          this.setTurnPlan(nextPlan);
+        }
+      } catch (e) {
+        // Ignore malformed arguments for plan updates
+      }
+    }
 
     if (meta?.noOp) {
       this.turnNoOpEdits.push(result.summary);
@@ -1071,16 +1177,4 @@ function emptyResponseWarningMessage(): string {
     return envMessage.trim();
   }
   return "Model returned an empty response (possible context limit). Try resuming with a shorter scope.";
-}
-
-function cloneTurnPlan(plan: TurnPlan | null): TurnPlan | null {
-  if (!plan) {
-    return null;
-  }
-  return {
-    taskKind: plan.taskKind,
-    title: plan.title,
-    explanation: plan.explanation,
-    steps: plan.steps.map((step) => ({ ...step }))
-  };
 }

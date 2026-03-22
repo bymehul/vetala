@@ -198,7 +198,7 @@ test("Package metadata stays in sync with the bundled TUI launcher", async () =>
     files?: string[];
   };
 
-  assert.equal(pkg.version, "0.6.0");
+  assert.equal(pkg.version, "0.6.1");
   assert.deepEqual(
     EXPECTED_TUI_FILES.filter((filePath) => !pkg.files?.includes(filePath)),
     []
