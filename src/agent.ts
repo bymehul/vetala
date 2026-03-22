@@ -185,6 +185,7 @@ export class Agent {
       let repeatWarningInjected = 0;
       let consecutiveApiErrors = 0;
       let malformedToolCallRetries = 0;
+      let emptyResponseRetries = 0;
       let sanitizedHistoryWarningShown = false;
 
       while (true) {
@@ -225,18 +226,18 @@ export class Agent {
 
           consecutiveApiErrors += 1;
           const errorMessage = error instanceof Error ? error.message : String(error);
-          const isNonRetryable = 
-            errorMessage.includes("guardrail") || 
-            errorMessage.includes("policy") || 
-            errorMessage.includes("unauthorized") || 
-            errorMessage.includes("401") || 
+          const isNonRetryable =
+            errorMessage.includes("guardrail") ||
+            errorMessage.includes("policy") ||
+            errorMessage.includes("unauthorized") ||
+            errorMessage.includes("401") ||
             errorMessage.includes("403");
 
           if (consecutiveApiErrors >= 3 || isNonRetryable) {
-            const finalMessage = isNonRetryable 
+            const finalMessage = isNonRetryable
               ? `I encountered a non-retryable API error: ${errorMessage}. Please check your provider settings or guardrail restrictions.`
               : `I've encountered multiple consecutive API errors and must stop. Last error: ${errorMessage}`;
-            
+
             await this.appendAndRenderAssistantMessage(finalMessage, true);
             return;
           }
@@ -255,6 +256,20 @@ export class Agent {
 
         const hasContent = typeof turn.content === "string" && turn.content.trim().length > 0;
         if (!hasContent && turn.toolCalls.length === 0) {
+          emptyResponseRetries += 1;
+
+          if (emptyResponseRetries <= 2) {
+            this.options.ui.activity("Empty response from model. Retrying...");
+            await this.options.sessionStore.appendMessage(
+              this.options.session,
+              this.persistedMessage({
+                role: "user",
+                content: "SYSTEM ALERT: Your previous response was empty. Please continue with your task. If you have finished, provide your final answer."
+              })
+            );
+            continue;
+          }
+
           if (emptyResponseWarningEnabled()) {
             this.options.ui.warn(emptyResponseWarningMessage());
           }
@@ -306,20 +321,22 @@ export class Agent {
           content: turn.content || null,
           tool_calls: partitionedToolCalls.validToolCalls.length > 0 ? partitionedToolCalls.validToolCalls : null
         });
-        
+
         // Extract thinking summary from content if not already set
         if (turn.content && !this.turnPlanInspected) {
           const lines = turn.content.split("\n");
           const thinkingLines = lines.filter(l => l.trim().startsWith("- ") || l.trim().startsWith("* "));
           if (thinkingLines.length > 0) {
-             this.options.ui.printThinking(thinkingLines.slice(0, 3).join("\n"));
+            this.options.ui.printThinking(thinkingLines.slice(0, 3).join("\n"));
           }
         }
 
         await this.options.sessionStore.appendMessage(this.options.session, assistantMessage);
 
         if (partitionedToolCalls.validToolCalls.length === 0) {
-          if (this.turnTaskKind !== "chat") {
+          const taskRequiresMutation = this.turnTaskKind === "edit" || this.turnTaskKind === "review" || this.turnTaskKind === "audit";
+
+          if (taskRequiresMutation) {
             const verificationPrompt = this.pendingVerificationPrompt();
             if (verificationPrompt) {
               this.turnVerificationNudges += 1;
@@ -333,16 +350,15 @@ export class Agent {
               continue;
             }
 
-            // Force the use of task_completed for non-chat tasks if they just wrote text
             const textContent = (turn.content || "").toLowerCase();
             const looksLikeCodeBlock = textContent.includes("```");
-            
-            if (this.turnVerificationNudges < 3 && !textContent.includes("task_completed")) {
+
+            if (this.turnVerificationNudges < 1 && !textContent.includes("task_completed")) {
               this.turnVerificationNudges += 1;
-              const pushback = looksLikeCodeBlock 
+              const pushback = looksLikeCodeBlock
                 ? "SYSTEM ALERT: You provided a code block in your response instead of using a tool to write it. You MUST use 'replace_in_file' or 'write_file' to apply these changes. Do not just write code in markdown."
                 : "SYSTEM ALERT: You stopped calling tools. If you are finished with the task, you MUST call the `task_completed` tool to formalize completion. If you are not finished, please use the appropriate tools to continue.";
-                
+
               this.options.ui.warn("Agent stopped prematurely. Nudging to use tools or task_completed...");
               await this.options.sessionStore.appendMessage(
                 this.options.session,
@@ -354,7 +370,7 @@ export class Agent {
               continue;
             }
           }
-          
+
           this.finalizeCurrentPlan();
           this.options.ui.endAssistantTurn();
           return;
@@ -362,7 +378,7 @@ export class Agent {
 
         let suppressedRepeats = 0;
         let taskCompletedCalled = false;
-        
+
         for (const toolCall of partitionedToolCalls.validToolCalls) {
           this.throwIfStopped();
           this.options.ui.printToolCall(toolCall);
@@ -652,13 +668,20 @@ export class Agent {
       "3. Persist memory of failures across your turn to prevent repeating mistakes.",
       "",
       "=== CONTEXT INTELLIGENCE & VERIFICATION DEPTH ===",
-      "1. Be ruthless about context. Only read files and lines that are strictly necessary.",
-      "2. You MUST empirically verify all changes. Do not claim a change works unless you have run a test, compiled the code, or executed a script that proves it.",
-      "3. Validate the environment and edge cases before declaring completion.",
+      "1. Be ruthless about context. Only read files and lines that are strictly necessary. Do NOT re-read a file you have already read in this turn.",
+      ...(this.turnTaskKind === "edit" || this.turnTaskKind === "review" || this.turnTaskKind === "audit" ? [
+        "2. You MUST empirically verify all changes. Do not claim a change works unless you have run a test, compiled the code, or executed a script that proves it.",
+        "3. Validate the environment and edge cases before declaring completion.",
+      ] : [
+        "2. This is a read-only task. Do NOT run build, test, or shell commands unless the user explicitly asked for them. Focus on reading files and providing a clear, complete answer.",
+        "3. When you have gathered enough context to answer, respond directly. You do not need to call task_completed for read-only tasks.",
+      ]),
       "",
-      "=== COMPLETION CONFIDENCE ===",
-      "1. Before ending your turn, internally evaluate your Confidence Score (0-100%).",
-      "2. If your confidence is below 95%, you must gather more information, run more tests, or ask the user for clarification before stopping.",
+      ...(this.turnTaskKind === "edit" || this.turnTaskKind === "review" || this.turnTaskKind === "audit" ? [
+        "=== COMPLETION CONFIDENCE ===",
+        "1. Before ending your turn, internally evaluate your Confidence Score (0-100%).",
+        "2. If your confidence is below 95%, you must gather more information, run more tests, or ask the user for clarification before stopping.",
+      ] : []),
       "",
       "=== BASE RULES ===",
       "When using tools, emit valid JSON object arguments only.",
@@ -819,12 +842,12 @@ export class Agent {
         const args = JSON.parse(toolCall.function.arguments);
         if (Array.isArray(args.sub_tasks)) {
           const nextPlan: TurnPlan = this.turnPlan ? cloneTurnPlan(this.turnPlan)! : {
-             taskKind: this.turnTaskKind,
-             title: "Dynamic Plan",
-             explanation: args.current_goal,
-             steps: []
+            taskKind: this.turnTaskKind,
+            title: "Dynamic Plan",
+            explanation: args.current_goal,
+            steps: []
           };
-          
+
           nextPlan.steps = args.sub_tasks.map((st: any) => ({
             id: st.id || "step-" + Math.random().toString(36).slice(2, 7),
             label: st.label,

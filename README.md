@@ -27,6 +27,19 @@ Current provider support includes Sarvam AI and OpenRouter.
 
 ## Patch Notes
 
+### v0.6.2
+Added:
+- Task-kind-aware agent loop: read-only tasks (explain, chat, research) skip verification nudges, shell commands, and `task_completed` requirements.
+- File read deduplication: `read_file` returns a short notice for already-read files instead of re-reading them.
+- Empty response retry: the agent retries up to 2 times on empty model responses instead of immediately stopping.
+- TUI slash command menu now supports ↑/↓ arrow navigation with Enter to submit the selected command.
+
+Patched:
+- Reduced premature-stop nudge cap from 3 to 1 for edit tasks to prevent duplicate output.
+- Lowered `MAX_READ_LINES` from 2000 to 1000 for better context efficiency with smaller models.
+- `read_file` tool description now warns the model that triggering truncation is token-inefficient.
+- Deliberation guidance provides read-only directives for explain/chat/research tasks.
+
 ### v0.6.1
 Added:
 - Enhanced the core cognitive execution loop with explicit `Think -> Act -> Observe -> Reflect` guardrails.

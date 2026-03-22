@@ -87,6 +87,7 @@ type model struct {
 	lastKeyDebug   string
 	mouseMode      tea.MouseMode
 	altScreen      bool
+	slashSelection int
 
 	// Modals
 	modalState     ModalState
@@ -254,6 +255,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			v := strings.TrimSpace(m.textArea.Value())
 			if v != "" {
+				if strings.HasPrefix(v, "/") && !m.running {
+					matches := matchSlashCommands(v)
+					if len(matches) > 0 {
+						idx := m.slashSelection
+						if idx >= len(matches) {
+							idx = 0
+						}
+						v = matches[idx].completion
+					}
+					m.slashSelection = 0
+				}
+
 				m.currentPlan = PlanUpdateData{}
 				m.entries = append(m.entries, EntryData{Kind: "user", Text: v})
 				m.trimEntries()
@@ -272,16 +285,39 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "tab":
-			// Autocomplete first slash suggestion
 			v := m.textArea.Value()
 			if strings.HasPrefix(v, "/") {
 				matches := matchSlashCommands(v)
 				if len(matches) > 0 {
-					m.textArea.SetValue(matches[0].completion)
+					idx := m.slashSelection
+					if idx >= len(matches) {
+						idx = 0
+					}
+					m.textArea.SetValue(matches[idx].completion)
 					m.textArea.MoveToEnd()
+					m.slashSelection = 0
 				}
 			}
 			return m, nil
+		case "up", "down":
+			v := m.textArea.Value()
+			if strings.HasPrefix(v, "/") && !m.running {
+				matches := matchSlashCommands(v)
+				if len(matches) > 0 {
+					if key == "down" {
+						m.slashSelection++
+						if m.slashSelection >= len(matches) {
+							m.slashSelection = len(matches) - 1
+						}
+					} else {
+						m.slashSelection--
+						if m.slashSelection < 0 {
+							m.slashSelection = 0
+						}
+					}
+					return m, nil
+				}
+			}
 		}
 
 		// Forward to text input

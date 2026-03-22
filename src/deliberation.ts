@@ -50,9 +50,15 @@ export function analyzeTurnDeliberation(userInput: string, options: Deliberation
   const reasoningEffort = configuredEffort ?? selectDynamicEffort(taskKind, score);
   const reasoningLabel = reasoningEffort ?? "none";
   const shouldShowThinking = taskKind !== "chat" && score >= 2;
-  const guidance = ambiguousEdit
-    ? "This request is underspecified. If initial inspection does not identify a clear target or acceptance criteria, call ask_user before editing."
-    : "For non-trivial tasks, form a concise plan first, then execute incrementally and verify after each meaningful change.";
+  const guidance = (() => {
+    if (ambiguousEdit) {
+      return "This request is underspecified. If initial inspection does not identify a clear target or acceptance criteria, call ask_user before editing.";
+    }
+    if (taskKind === "explain" || taskKind === "chat" || taskKind === "research") {
+      return "This is a read-only task. Read the necessary files, then respond with a clear answer. Do not run build, test, or shell commands unless the user explicitly asked. Do not call task_completed — just provide your answer directly.";
+    }
+    return "For non-trivial tasks, form a concise plan first, then execute incrementally and verify after each meaningful change.";
+  })();
 
   return {
     taskKind,

@@ -4,7 +4,7 @@ import { buildDiffPreview, lcsDiff } from "../edits/diff.js";
 import type { ToolContext, ToolResult, ToolSpec } from "../types.js";
 import { searchRepo, searchRepoSymbol } from "./repo-search.js";
 
-const MAX_READ_LINES = 2000;
+const MAX_READ_LINES = 1000;
 const DEFAULT_SEARCH_LIMIT = 20;
 const DEFAULT_SYMBOL_LIMIT = 3;
 const DEFAULT_SYMBOL_CONTEXT = 20;
@@ -137,7 +137,7 @@ const searchFilesTool: ToolSpec = {
 
 const readFileTool: ToolSpec = {
   name: "read_file",
-  description: "Read a UTF-8 text file, optionally limiting the output to a line range. Use this first when the user already gave you a concrete file path.",
+  description: "Read a UTF-8 text file, optionally limiting the output to a line range. Use this first when the user already gave you a concrete file path. To maintain context efficiency, use 'startLine' and 'endLine' for targeted reads of specific sections. Output exceeding 1000 lines will be auto-truncated; triggering this limit is token-inefficient. Always retrieve only the minimum content necessary for your next step.",
   jsonSchema: {
     type: "object",
     properties: {
@@ -161,11 +161,24 @@ const readFileTool: ToolSpec = {
   async execute(rawArgs, context) {
     const args = expectObject(rawArgs);
     const target = await context.paths.ensureReadable(requiredString(args.path, "path"));
-    
+    const hasSpecificRange = typeof args.startLine === "number" || typeof args.endLine === "number";
+
+    if (!hasSpecificRange && context.reads.hasRead(target)) {
+      return {
+        summary: `Already read ${target}`,
+        content: `This file was already read earlier in this session. Reuse the earlier result instead of reading it again. If you need a specific section, use startLine and endLine parameters.`,
+        isError: false,
+        referencedFiles: [target],
+        meta: {
+          inspectedPaths: [target]
+        }
+      };
+    }
+
     try {
       const stats = await stat(target);
       if (stats.isDirectory()) {
-      return {
+        return {
           summary: `Cannot read ${target}`,
           content: `${target} is a directory, not a file. Please use the list_dir tool to explore its contents.`,
           isError: true,
@@ -175,7 +188,7 @@ const readFileTool: ToolSpec = {
           }
         };
       }
-      
+
       const fileContent = await readFile(target, "utf8");
       const lines = fileContent.split("\n");
       const startLine = integerOrDefault(args.startLine, 1);
@@ -224,11 +237,11 @@ const readFileChunkTool: ToolSpec = {
     const target = await context.paths.ensureReadable(requiredString(args.path, "path"));
     const startLine = requiredInteger(args.startLine, "startLine");
     const endLine = requiredInteger(args.endLine, "endLine");
-    
+
     try {
       const stats = await stat(target);
       if (stats.isDirectory()) {
-      return {
+        return {
           summary: `Cannot read ${target}`,
           content: `${target} is a directory, not a file. Please use the list_dir tool to explore its contents.`,
           isError: true,

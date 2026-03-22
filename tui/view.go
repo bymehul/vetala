@@ -1134,11 +1134,15 @@ func (m model) renderSlashSuggestions(suggestions []slashSuggestion) string {
 
 	var lines []string
 	lines = append(lines, accentStyle.Render("Commands"))
-	lines = append(lines, mutedStyle.Render("Tab autocompletes the first match."))
+	lines = append(lines, mutedStyle.Render("↑/↓ navigate · Tab autocompletes selected."))
+	selected := m.slashSelection
+	if selected >= len(suggestions) {
+		selected = 0
+	}
 	for i, s := range suggestions {
 		nameCol := lipgloss.NewStyle().Width(nameWidth).Render(s.completion)
 		detailCol := mutedStyle.Render(wrapText(s.detail, detailWidth))
-		if i == 0 {
+		if i == selected {
 			nameCol = accentStyle.Render("❯ " + lipgloss.NewStyle().Width(maxInt(1, nameWidth-2)).Render(s.completion))
 		} else {
 			nameCol = "  " + nameCol
