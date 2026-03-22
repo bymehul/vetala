@@ -5,7 +5,7 @@ export type TurnPlanStatus = "pending" | "in_progress" | "completed";
 export type TurnPlanStage = "inspect" | "decide" | "execute" | "complete";
 
 export interface TurnPlanStep {
-  id: "inspect" | "decide" | "execute" | "summarize";
+  id: string;
   label: string;
   status: TurnPlanStatus;
 }
